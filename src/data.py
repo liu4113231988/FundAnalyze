@@ -13,8 +13,10 @@
 """
 from __future__ import annotations
 
+import json
 import time
 import warnings
+from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 import numpy as np
@@ -216,17 +218,56 @@ def load_pe_panel(verbose: bool = True) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------ 缓存层
-def _cached(name: str, builder):
+def _cache_meta_path(name: str) -> Path:
+    return C.DATA_DIR / f"{name}.meta.json"
+
+
+def _cache_meta_valid(name: str, meta: dict) -> bool:
+    """
+    缓存是否仍有效。
+
+    用 sidecar 元数据而不是把版本号塞进文件名，是为了**不作废已有的 14 份
+    panel 缓存**——它们仍然有效，强行改名会让离线环境（无 akshare）直接跑不起来。
+    没有元数据文件的旧缓存一律视为有效。
+    """
+    fp = _cache_meta_path(name)
+    if not fp.exists():
+        return True
+    try:
+        return json.loads(fp.read_text(encoding="utf-8")) == meta
+    except Exception:               # noqa: BLE001
+        return True
+
+
+def _cache_meta_write(name: str, meta: dict):
+    try:
+        _cache_meta_path(name).write_text(
+            json.dumps(meta, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    except Exception:               # noqa: BLE001
+        pass
+
+
+def _cached(name: str, builder, meta: Optional[dict] = None):
     fp = C.DATA_DIR / f"{name}.csv"
-    if fp.exists():
+    stale = meta is not None and not _cache_meta_valid(name, meta)
+    if stale:
+        print(f"[data] 缓存 {name} 口径已变更，重新抓取")
+    if fp.exists() and not stale:
         try:
             df = pd.read_csv(fp, index_col=0, parse_dates=True)
             if len(df):
+                # ★ 命中旧缓存时也要补写元数据，否则版本守卫永远不会被"武装"：
+                # 之后有人改 DATA_CACHE_VERSION 时，_cache_meta_valid 会因为
+                # 找不到元数据而一律判为有效，缓存照样命中，守卫形同虚设。
+                if meta is not None:
+                    _cache_meta_write(name, meta)
                 return df
         except Exception as e:      # noqa: BLE001
             print(f"[data] 缓存 {name} 损坏（{type(e).__name__}），重新构建")
     df = builder()
     df.to_csv(fp, encoding="utf-8-sig")
+    if meta is not None:
+        _cache_meta_write(name, meta)
     return df
 
 
@@ -236,9 +277,17 @@ def load_panel(fund_code: str, start: str = C.START_DATE,
     """
     返回对齐后的价格面板：列 = 候选指数 + __FUND__。
     """
-    cache_name = f"panel_{fund_code}_{start}"
-    if refresh and (C.DATA_DIR / f"{cache_name}.csv").exists():
-        (C.DATA_DIR / f"{cache_name}.csv").unlink()
+    # ★ end 必须进缓存键：原键只有 (code, start)，改了 END_DATE 仍会命中旧缓存，
+    # 拿到一段已经被截取过的面板，而且不会有任何提示。
+    cache_name = f"panel_{fund_code}_{start}" + ("" if end is None else f"_to{end}")
+    meta = {"v": C.DATA_CACHE_VERSION, "code": fund_code,
+            "start": start, "end": end,
+            "n_candidates": len(C.NAME_OF)}
+    if refresh:
+        for p in (C.DATA_DIR / f"{cache_name}.csv",
+                  C.DATA_DIR / f"{cache_name}.meta.json"):
+            if p.exists():
+                p.unlink()
 
     def build():
         if verbose:
@@ -254,4 +303,4 @@ def load_panel(fund_code: str, start: str = C.START_DATE,
                   f"({px.index[0].date()} ~ {px.index[-1].date()})")
         return px
 
-    return _cached(cache_name, build)
+    return _cached(cache_name, build, meta=meta)

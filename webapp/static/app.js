@@ -41,9 +41,17 @@ function showAlert(msg) {
   a.textContent = msg; a.hidden = false;
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
-function busy(on, txt) {
-  $('loading').hidden = !on;
-  if (txt) $('loadingTxt').textContent = txt;
+// （已删除从未被调用的 busy() 与对应的 #loading 遮罩）
+
+// 代码合法但名录里查不到时给个提示。查不到也可能只是名录接口不可用，
+// 所以只在「明确查到名录且未命中」时才提示，且不阻断分析。
+async function checkName(code) {
+  try {
+    const r = await api(`/api/name/${code}`);
+    if (r && r.found === false && !r.error) {
+      showAlert(`未在基金名录中查到 ${code}，请确认代码是否正确。`);
+    }
+  } catch (e) { /* 名录查询失败不阻断主流程 */ }
 }
 
 // ==================================================================== 初始化
@@ -75,6 +83,7 @@ function busy(on, txt) {
     e.preventDefault();
     const c = $('codeInput').value.trim();
     if (!/^\d{6}$/.test(c)) { showAlert('请输入 6 位数字基金代码，例如 110022'); return; }
+    checkName(c);      // 代码存在性提示（异步，不阻塞）
     run(c);
   };
   sel.onchange = e => { if (e.target.value) run(e.target.value); };
@@ -87,9 +96,18 @@ function busy(on, txt) {
     renderModelStrip(); renderRank();
     showAlert(`已把「${S.result.models[S.sel].name}」设为最佳模型基准。`);
   };
-  $('rollWin').onchange = e => {
+  // 滚动窗口改动 → 只重算相关性区块（/api/corr），不必重跑拟合。
+  // 改之前它只是改了个本地变量、本地重绘，后端根本不知道，是个死控件。
+  $('rollWin').onchange = async e => {
     S.rollWin = +e.target.value || 120;
-    if (S.result) renderCorr();
+    if (!S.result) return;
+    try {
+      const r = await api(`/api/corr?code=${S.result.code}&win=${S.rollWin}`);
+      S.result.correlation = r.correlation;
+      renderCorr();
+    } catch (err) {
+      showAlert('滚动相关重算失败：' + err.message);
+    }
   };
   $('btnApplyParams').onclick = applyParams;
   $('btnResetParams').onclick = () => {

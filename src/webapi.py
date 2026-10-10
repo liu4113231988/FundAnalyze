@@ -177,14 +177,16 @@ def _cache_save(code: str, tag: str, obj):
 
 # ====================================================================== 相关性分析
 def correlation_block(panel: pd.DataFrame, nav: pd.Series,
-                      top_n: int = 15) -> dict:
+                      top_n: int = 15, roll_n: int = 120) -> dict:
     """
     基金与候选指数的相关性分析。
 
     三个层次：
       1. 全样本相关系数矩阵（基金 × 全部指数）
       2. Top-N 排行榜（按 |相关系数| 排序）
-      3. 滚动 120 日相关系数（看风格是否漂移）
+      3. 滚动 roll_n 日相关系数（看风格是否漂移）
+
+    roll_n 可由前端传入（/api/corr 会用它做低成本重算）。
     """
     R = np.log(panel.astype(float)).diff().dropna()
     fund = R["__FUND__"]
@@ -199,8 +201,8 @@ def correlation_block(panel: pd.DataFrame, nav: pd.Series,
     sub.insert(0, "【基金】", corr.reindex(keep))
     sub.loc["【基金】"] = np.concatenate([[1.0], corr.reindex(keep).values])
 
-    # 滚动 120 日相关系数（对 Top8 指数）
-    roll_n = 120
+    # 滚动 roll_n 日相关系数（对 Top8 指数）
+    roll_n = int(max(20, min(int(roll_n), len(R) - 1)))
     roll = {}
     for c in keep[:8]:
         rc = R[c].rolling(roll_n).corr(fund).dropna()
@@ -676,17 +678,17 @@ def analyze(code: str, models: Optional[List[str]] = None,
     return result
 
 
-def _guess_name(code: str) -> str:
+def _guess_name(code: str) -> Optional[str]:
     """
-    尝试解析基金中文名，失败则退回代码。
+    尝试解析基金中文名；**查不到时返回 None**，不再用代码冒充名字。
 
-    天天基金的 fund_name_em() 返回全市场基金列表（含代码与简称），
-    一次拉取后按代码匹配即可，无需逐只查询。
+    早期实现失败时回退成 code，调用方无法区分"这只基金就叫 110022"和
+    "名录里查不到"，于是前端对"代码输错了"完全静默，只能等任务跑完才发现。
     """
     hit = _cache_load(code, "name")
-    if hit:
-        return hit
-    nm = code
+    if hit is not None:
+        return hit if hit != "" else None
+    nm = None
     try:
         import akshare as ak
         info = ak.fund_name_em()
@@ -696,16 +698,16 @@ def _guess_name(code: str) -> str:
         m = info[info[col].astype(str).str.zfill(6) == code]
         if len(m) and namecol:
             nm = str(m[namecol].iloc[0])
-        elif len(m):
+        elif len(m) and info.shape[1] > 1:
             nm = str(m.iloc[0, 1])
     except Exception:                      # noqa: BLE001
-        nm = code
-    _cache_save(code, "name", nm)
+        nm = None
+    _cache_save(code, "name", nm or "")
     return nm
 
 
 def get_fund_name(code: str) -> str:
-    return _guess_name(code)
+    return _guess_name(code) or code
 
 
 # ====================================================================== 局部重算

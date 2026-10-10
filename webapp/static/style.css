@@ -221,14 +221,6 @@ table.tbl tr.clickable{cursor:pointer}
   transition:.16s;font-family:var(--mono)}
 .chip:hover{border-color:var(--accent);color:var(--accent)}
 
-.loading{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);
-  display:flex;align-items:center;gap:11px;padding:11px 20px;border-radius:24px;
-  background:var(--panel2);border:1px solid var(--line2);font-size:13px;
-  box-shadow:0 8px 26px rgba(0,0,0,.45);z-index:100}
-.spin{width:15px;height:15px;border:2px solid var(--line2);border-top-color:var(--accent);
-  border-radius:50%;animation:sp .8s linear infinite}
-@keyframes sp{to{transform:rotate(360deg)}}
-
 [hidden]{display:none!important}
 ::-webkit-scrollbar{width:9px;height:9px}
 ::-webkit-scrollbar-track{background:var(--bg)}

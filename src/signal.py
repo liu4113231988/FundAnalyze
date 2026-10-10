@@ -128,9 +128,17 @@ class SignalEngine:
             if s is not None:
                 w_sym[s] += weights_hist[a].fillna(0.0)
 
-        # 月度 PE 按时间 asof 对齐到每个重估日（不能用 reindex().ffill()，
-        # 那只会在标签精确重合处看到源值，非重合目标行会一直沿用更早期的值）
-        pe_v = pe_pct[syms].reindex(w_sym.index, method="ffill")
+        # 月度 PE asof 对齐到每个重估日。
+        # reindex(method="ffill") 在**索引单调递增**的前提下等价于 asof 连接，
+        # 会取"不晚于该日的最近一期"，正是我们要的语义（早期注释说不能用它，是错的）。
+        # ★ 但要叠加发布滞后：乐咕乐股的月末 PE（如 2020-01-31）要到次月初才发布，
+        # 直接 ffill 会让 1 月 31 日当天就"知道"1 月末的估值，含 1~10 天前瞻。
+        lag = int(c.get("pe_lag_days", 10))
+        pe_src = pe_pct[syms]
+        if lag > 0:
+            pe_src = pe_src.copy()
+            pe_src.index = pe_src.index + pd.Timedelta(days=lag)
+        pe_v = pe_src.reindex(w_sym.index, method="ffill")
         w_eff = w_sym.where(pe_v.notna(), 0.0)
         denom = w_eff.sum(axis=1).replace(0.0, np.nan)
         pe_agg = (w_sym * pe_v.fillna(0.0)).sum(axis=1) / denom
@@ -150,9 +158,16 @@ class SignalEngine:
 
         df = pd.concat([t, d, v], axis=1)
         wt, wv, wl = c["w_trend"], c["w_dev"], c["w_val_pe"]
+        # 权重全为 0 时分母为 0 → score 变 inf/NaN，且不会报错，
+        # 只会让下游仓位全部塌到 0.5。这是配置错误，明确抛出。
+        denom = float(wt) + float(wv) + float(wl)
+        if denom <= 0:
+            raise ValueError(
+                f"三通道权重之和必须为 0 以外的值，当前 "
+                f"w_trend={wt}, w_dev={wv}, w_val_pe={wl}")
         df["score"] = (wt * df["trend_score"].fillna(0)
                        + wv * df["dev_score"].fillna(0)
-                       + wl * df["val_score"].fillna(0)) / (wt + wv + wl)
+                       + wl * df["val_score"].fillna(0)) / denom
 
         raw_pos = np.clip(0.5 + 0.5 * df["score"], 0.0, 1.0)
         df["position_raw"] = raw_pos

@@ -36,6 +36,7 @@ from flask_cors import CORS                                # noqa: E402
 import pandas as pd                                        # noqa: E402
 
 from src import config as C                                # noqa: E402
+from src import data as D                                  # noqa: E402
 from src.models import MODEL_ORDER, model_catalog         # noqa: E402
 from src.webapi import (CACHE_DIR, JOBS, analyze, backtest_fund,  # noqa: E402
                          refit_single)
@@ -118,6 +119,46 @@ def _result_cache_path(code: str, models, params, max_rebal=None,
     return CACHE_DIR / f"result_v{C.CACHE_VERSION}_{code}_{h}.pkl"
 
 
+def _atomic_pickle_dump(obj, path: Path, retries: int = 6):
+    """
+    原子写盘：先写同目录临时文件再 os.replace。
+
+    为什么必须这样：结果缓存路径只由 (基金, 模型集, 参数) 决定，而任务 id 带时间戳，
+    所以**两个相同的并发请求会持有不同的 job_id 却写同一个文件**。
+    直接 open(path,'wb') 会让两个线程交错写入，产生截断/半截的 pickle，
+    而读取侧只是 try/except 吞掉异常 → 表现为"缓存偶尔失效、偶尔白屏"。
+
+    两个踩过的坑：
+      1. 临时文件名必须**每次调用唯一**。只加 pid 是不够的——Flask 是多线程，
+         同进程内的并发请求会撞同一个 tmp 名，互相覆盖。
+      2. Windows 下 os.replace 在目标文件被另一线程短暂占用时会抛 WinError 32，
+         必须重试；重试仍失败就放弃写缓存（缓存本身是 best-effort，不该让请求失败）。
+    """
+    import os
+    import threading
+    import time
+    import uuid
+
+    tmp = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        with tmp.open("wb") as f:
+            pickle.dump(obj, f)
+        for i in range(retries):
+            try:
+                os.replace(tmp, path)
+                return
+            except OSError:
+                if i == retries - 1:
+                    raise
+                time.sleep(0.05 * (i + 1))
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def _sweep_old_caches():
     """删除非当前版本的结果缓存，避免旧口径文件无限堆积。"""
     prefix = f"result_v{C.CACHE_VERSION}_"
@@ -170,10 +211,9 @@ def api_analyze():
                           refresh=refresh, job_id=jid, max_rebal=max_rebal,
                           auto_equity=auto_equity)
             try:
-                with cp.open("wb") as f:
-                    pickle.dump(res, f)
+                _atomic_pickle_dump(res, cp)
             except Exception:                         # noqa: BLE001
-                pass
+                pass      # 缓存写失败不影响本次返回结果，下次重算即可
             JOBS.finish(jid, res)
         except Exception as e:                        # noqa: BLE001
             traceback.print_exc()
@@ -283,11 +323,39 @@ def api_backtest():
 
 @app.route("/api/name/<code>")
 def api_name(code: str):
-    from src.webapi import get_fund_name
+    """查基金中文名；found=False 表示名录里查不到（可能代码有误，也可能接口不可用）。"""
+    from src.webapi import _guess_name
     try:
-        return jsonify({"code": code, "name": get_fund_name(code)})
+        nm = _guess_name(code)
     except Exception as e:                            # noqa: BLE001
-        return jsonify({"code": code, "name": code, "error": str(e)[:80]})
+        return jsonify({"code": code, "name": code, "found": False,
+                        "error": str(e)[:80]})
+    return jsonify({"code": code, "name": nm or code, "found": nm is not None})
+
+
+@app.route("/api/corr")
+def api_corr():
+    """
+    只重算相关性区块（滚动窗口可调）。
+
+    改滚动窗口不需要重跑拟合：面板走缓存，这里只做滚动相关，几百毫秒。
+    没有这个端点时，前端那个"滚动窗口"输入框是个纯装饰的死控件。
+    """
+    from src.webapi import correlation_block
+    code = str(request.args.get("code", "")).strip()
+    try:
+        win = int(request.args.get("win", 120))
+    except (TypeError, ValueError):
+        return jsonify({"error": "win 必须是整数"}), 400
+    if not (len(code) == 6 and code.isdigit()):
+        return jsonify({"error": "请输入 6 位基金代码"}), 400
+    win = max(20, min(win, 750))
+    try:
+        panel = D.load_panel(code, verbose=False)
+        corr = correlation_block(panel, panel["__FUND__"], roll_n=win)
+    except Exception as e:                            # noqa: BLE001
+        return jsonify({"error": f"{type(e).__name__}: {str(e)[:200]}"}), 500
+    return jsonify({"ok": True, "code": code, "correlation": corr})
 
 
 # ====================================================================== 启动

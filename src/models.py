@@ -167,9 +167,17 @@ def _constrained_fit(X: np.ndarray, y: np.ndarray, total: float,
     res = minimize(obj, np.full(k, total / k), jac=jac, method="SLSQP",
                    bounds=[(0.0, None)] * k, constraints=cons,
                    options={"maxiter": 500, "ftol": 1e-12})
-    w = np.clip(np.asarray(res.x, dtype=float), 0.0, None)
+    # ★ 必须检查收敛：原实现直接 res.x 就用，SLSQP 在病态窗口（指数高度共线、
+    # 或窗口内样本过少）会返回未收敛解甚至 NaN，权重里的 NaN 会一路污染
+    # 合成基准、健康分与回测净值，且不会报错——只会得到一条莫名其妙的曲线。
+    x = np.asarray(res.x, dtype=float)
+    if not res.success or not np.all(np.isfinite(x)):
+        return np.full(k, total / k)
+    w = np.clip(x, 0.0, None)
     if w.sum() > 0:
         w = w * total / w.sum()
+    else:
+        w = np.full(k, total / k)
     return w
 
 
@@ -416,11 +424,19 @@ def _fit_pcr(X, y, cols, equity_ratio, prm):
     p = PCA(n_components=best_k, random_state=0).fit(Xs)
     Z = p.transform(Xs)
     lr = LinearRegression().fit(Z, y)
-    pred = lr.predict(Z)
-    # 把主成分载荷拆回原始指数空间
-    w_full = p.components_.T @ lr.coef_
+    # 把主成分载荷拆回**原始指数空间**：
+    #   y ≈ Z·β = ((X−mu)/sd)·components_ᵀ·β  ⇒  对 X 的系数 = components_ᵀ·β / sd
+    # 原实现漏掉了 /sd —— 各指数日波动相差 2~3 倍，不除会系统性扭曲权重
+    # （把低波动指数的重要性放大、高波动指数压小）。
+    w_full = (p.components_.T @ lr.coef_) / sd
     w = _clean_weights(w_full, cols, equity_ratio,
                        float(prm.get("min_weight", 0.01)), X.shape[1])
+    wv = w.reindex(cols).fillna(0.0).values
+    # ★ 评分口径必须与其他线性模型一致：全部用 X@w，不带截距。
+    # 原实现用带截距的 lr.predict(Z) 算窗口内 R²，而样本外用的是 X@w
+    # （_run_one 里线性模型一律走 X@w），两个口径不一致会让窗口内 R² 虚高、
+    # 进而在前端被误判为"过拟合"（窗口内 − 样本外 > 0.08）。
+    pred = X @ wv
     r2, te = _score(pred, y)
     return FitResult(weights=w, pred=pred, r2=r2, te=te,
                      extra={"n_components": int(best_k),
@@ -544,9 +560,11 @@ def _fit_krr(X, y, cols, equity_ratio, prm):
     if mdl is None:
         mdl = KernelRidge(alpha=0.3, kernel="rbf", gamma=g_base).fit(Xn, y)
     pred = mdl.predict(Xn)
-    # 用 dual 系数还原到原始指数空间：w = Xn^T @ dual
+    # 用 dual 系数还原到**原始指数空间**：w_raw = (Xn^T @ dual) / sd
+    # 原实现同样漏了 /sd。注意 RBF 核下这只是一个线性近似（核模型不存在
+    # 真正的原始空间权重），本模型 interpretable=False，权重仅作重要性展示。
     try:
-        w_raw = Xn.T @ np.asarray(mdl.dual_coef_).ravel()
+        w_raw = (Xn.T @ np.asarray(mdl.dual_coef_).ravel()) / sd
     except Exception:                      # noqa: BLE001
         w_raw = np.array([abs(np.corrcoef(X[:, j], pred)[0, 1])
                           for j in range(X.shape[1])])

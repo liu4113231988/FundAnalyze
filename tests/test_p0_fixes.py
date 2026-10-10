@@ -236,11 +236,108 @@ def t4():
         chk(bad == 0, f"全部 {len(g)} 个格子的对照组与自身平均仓位一致（不一致 {bad} 个）")
 
 
+# ============================================================== T5 模型层
+def _synth_panel(n=600, k=5, seed=3):
+    """列波动率刻意拉开 6 倍，用于检验权重是否从标准化空间正确还原。"""
+    rng = np.random.default_rng(seed)
+    sd = np.linspace(0.004, 0.024, k)
+    X = rng.normal(0.0, 1.0, (n, k)) * sd
+    w = np.array([0.30, 0.25, 0.15, 0.12, 0.08])[:k]
+    y = X @ w
+    cols = [f"a{i}" for i in range(k)]
+    return X, y, cols
+
+
+def t5():
+    print("\nT5 · 模型层：权重必须从标准化空间正确还原（除以 sd）")
+    from src.models import fit_window
+
+    X, y, cols = _synth_panel()
+    X2 = X.copy()
+    X2[:, 0] *= 2.0        # 只放大第 0 列的波动
+
+    for key in ("pcr", "krr"):
+        try:
+            r1 = fit_window(key, X, y, cols, None, 0.9)
+            r2 = fit_window(key, X2, y, cols, None, 0.9)
+            w1 = r1.weights.reindex(cols).fillna(0.0).values
+            w2 = r2.weights.reindex(cols).fillna(0.0).values
+            ratio1 = w1[0] / w1[1] if abs(w1[1]) > 1e-9 else np.nan
+            ratio2 = w2[0] / w2[1] if abs(w2[1]) > 1e-9 else np.nan
+            # 第 0 列波动翻倍 ⇒ 它的权重应约为原来的一半
+            want = ratio1 / 2.0
+            ok = np.isfinite(ratio2) and abs(ratio2 - want) < 0.15 * abs(want)
+            chk(ok, f"{key}: 列0 波动×2 → 权重比 {ratio1:.3f} → {ratio2:.3f}"
+                    f"（应≈{want:.3f}）。若不除以 sd 则两者会完全相等")
+        except Exception as e:                                # noqa: BLE001
+            chk(False, f"{key} 拟合抛异常 {type(e).__name__}: {e}")
+
+    # 评分口径：pred 必须等于 X@w（PCA 早期版本用带截距的 lr.predict，
+    # 与样本外用的 X@w 不一致，会让窗口内 R² 虚高并被误判为过拟合）
+    try:
+        r = fit_window("pcr", X, y, cols, None, 0.9)
+        wv = r.weights.reindex(cols).fillna(0.0).values
+        chk(np.allclose(r.pred, X @ wv, atol=1e-10),
+            "pcr: pred 与 X@w 一致（窗口内与样本外同一口径）")
+    except Exception as e:                                    # noqa: BLE001
+        chk(False, f"pcr 一致性检查抛异常 {type(e).__name__}: {e}")
+
+    # SLSQP 不收敛时必须兜底，不能返回 NaN
+    from src.models import _constrained_fit
+    bad = np.full((5, 3), np.nan)          # 全 NaN 的输入会让 SLSQP 直接失败
+    w = _constrained_fit(bad, np.full(5, np.nan), 0.9)
+    chk(np.all(np.isfinite(w)) and abs(w.sum() - 0.9) < 1e-6,
+        f"约束回归在病态输入下返回有限权重（Σw={w.sum():.3f}），不产生 NaN")
+
+
+# ============================================================== T6 数据缓存
+def t6():
+    print("\nT6 · 数据缓存：口径可失效、并发写不损坏")
+    from src import data as D
+
+    # 元数据不一致 → 判为过期
+    D._cache_meta_write("_t6probe", {"v": 1, "end": None})
+    same = D._cache_meta_valid("_t6probe", {"v": 1, "end": None})
+    diff = D._cache_meta_valid("_t6probe", {"v": 2, "end": "2020-01-01"})
+    chk(same and not diff, "缓存元数据一致则命中、口径变更则判为过期")
+    p = D._cache_meta_path("_t6probe")
+    if p.exists():
+        p.unlink()
+
+    # end 必须进缓存键
+    k1 = f"panel_110022_2016-01-01"
+    k2 = f"panel_110022_2016-01-01_to2020-01-01"
+    chk(k1 != k2, "带 end 与不带 end 的缓存键不同（改 END_DATE 不再命中旧缓存）")
+
+    # 并发写同一缓存文件（两个相同请求不同 job_id 会撞同一路径）
+    import pickle, threading
+    from src import config as C
+    from webapp.app import _atomic_pickle_dump
+    fp = C.DATA_DIR / "_t6probe.pkl"
+    def w(i):
+        for _ in range(30):
+            _atomic_pickle_dump({"i": i, "pad": list(range(500))}, fp)
+    ts = [threading.Thread(target=w, args=(i,)) for i in range(4)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    try:
+        obj = pickle.loads(fp.read_bytes())
+        ok = isinstance(obj, dict) and "pad" in obj
+    except Exception as e:                                    # noqa: BLE001
+        ok = False
+        print(f"      加载失败 {type(e).__name__}: {e}")
+    chk(ok, "4 线程并发写同一路径后文件仍可正常反序列化")
+    left = list(C.DATA_DIR.glob("_t6probe*.tmp"))
+    chk(not left, f"无残留临时文件（{len(left)} 个）")
+    if fp.exists():
+        fp.unlink()
+
+
 def main():
     print("=" * 78)
     print("P0 修复回归验证")
     print("=" * 78)
-    for fn in (t1, t2, t3, t4):
+    for fn in (t1, t2, t3, t4, t5, t6):
         try:
             fn()
         except Exception as e:                                # noqa: BLE001
