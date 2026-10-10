@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fund Lens · 基金风格穿透与机器学习拟合</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ================= 顶栏 ================= -->
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <div>
+      <h1>Fund Lens</h1>
+      <p>主动基金 · 指数穿透 · 多模型机器学习拟合</p>
+    </div>
+  </div>
+  <form class="search" id="searchForm" autocomplete="off">
+    <input id="codeInput" placeholder="输入 6 位基金代码，如 110022" maxlength="6" />
+    <button type="submit" id="runBtn">开始分析</button>
+    <select id="presetSel" title="示例基金">
+      <option value="">— 示例 —</option>
+    </select>
+  </form>
+</header>
+
+<!-- ================= 进度条 ================= -->
+<div class="progress-wrap" id="progressWrap" hidden>
+  <div class="progress-box">
+    <div class="p-title"><span id="pStage">准备中…</span><span id="pPct">0%</span></div>
+    <div class="p-track"><div class="p-fill" id="pFill"></div></div>
+    <div class="p-detail" id="pDetail"></div>
+  </div>
+</div>
+
+<!-- ================= 错误条 ================= -->
+<div class="alert" id="alert" hidden></div>
+
+<!-- ================= 主体 ================= -->
+<main id="main" hidden>
+
+  <!-- ---------- 概况 ---------- -->
+  <section class="block">
+    <div class="fund-head">
+      <div>
+        <h2 id="fundName">—</h2>
+        <p class="meta" id="fundMeta">—</p>
+      </div>
+      <div class="head-actions">
+        <button class="btn ghost" id="btnRefresh" title="强制重新抓取数据并重算">↻ 刷新数据</button>
+        <button class="btn ghost" id="btnReLearn" title="用当前模型与参数重新学习">⟳ 重新学习</button>
+        <button class="btn primary" id="btnSaveSel" title="把当前所选模型设为分析基准">★ 设为最佳模型</button>
+      </div>
+    </div>
+
+    <div class="kpis" id="kpis"></div>
+
+    <!-- 结论卡 -->
+    <div class="cards" id="insights"></div>
+  </section>
+
+  <!-- ---------- 模型选择与对比 ---------- -->
+  <section class="block">
+    <div class="sec-head">
+      <h3>机器学习模型对比</h3>
+      <div class="sec-tools">
+        <button type="button" class="btn ghost xs" id="mpQuick"
+          title="选择 5 个代表性模型">快速 5 个</button>
+        <button type="button" class="btn ghost xs" id="mpFull"
+          title="选择全部 11 个模型">全部 11 个</button>
+        <label class="switch-inline" title="重估点越密越精确，但耗时线性增长">
+          重估点
+          <select id="rebalSel" style="padding:5px 9px;border-radius:7px;
+            border:1px solid var(--line2);background:var(--bg2);color:var(--fg2);font-size:12px">
+            <option value="30">30 · 最快</option>
+            <option value="60" selected>60 · 推荐</option>
+            <option value="100">100 · 精细</option>
+            <option value="0">全部 · 最精确</option>
+          </select>
+        </label>
+        <span class="hint" id="runHint"></span>
+      </div>
+    </div>
+
+    <div class="model-picker" id="modelPicker">
+      <div class="mp-list" id="mpList"></div>
+      <label class="switch-inline" title="用窗口内数据估计基金实际仓位，替换固定 90% 约束。适合低仓位/对冲基金，不引入前瞻">
+        <input type="checkbox" id="autoEquity"> 仓位约束自适应（低仓位 / 对冲基金适用）
+      </label>
+    </div>
+
+    <div class="model-strip" id="modelStrip"></div>
+
+    <div class="table-wrap">
+      <table class="tbl" id="rankTable"></table>
+    </div>
+    <p class="note" id="rankNote"></p>
+  </section>
+
+  <!-- ---------- 选中模型详情 ---------- -->
+  <section class="block">
+    <div class="sec-head">
+      <h3>模型详情 · <span id="selName">—</span></h3>
+      <div class="sec-tools">
+        <span class="tag" id="selFamily"></span>
+        <span class="tag" id="selInterp"></span>
+        <span class="tag" id="selTime"></span>
+      </div>
+    </div>
+    <p class="desc" id="selDesc"></p>
+
+    <div class="kpis small" id="selKpis"></div>
+    <div id="selNote" hidden></div>
+
+    <div class="grid2">
+      <div class="panel">
+        <h4>拟合曲线 · 基金 vs 合成基准</h4>
+        <div id="chartCurve" class="chart"></div>
+      </div>
+      <div class="panel">
+        <h4>拟合残差（基金 − 合成基准）</h4>
+        <div id="chartResid" class="chart"></div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="panel">
+        <h4>权重时间演化（Top 8 指数）</h4>
+        <div id="chartWHist" class="chart"></div>
+      </div>
+      <div class="panel">
+        <h4>当前风格权重</h4>
+        <div id="chartWeights" class="chart"></div>
+      </div>
+    </div>
+
+    <details class="tuner">
+      <summary>调整超参并重新学习</summary>
+      <div class="tuner-body" id="tunerBody"></div>
+      <button class="btn primary" id="btnApplyParams">用这些参数重新学习</button>
+      <button class="btn ghost" id="btnResetParams">恢复默认</button>
+    </details>
+  </section>
+
+  <!-- ---------- 买卖决策回测 ---------- -->
+  <section class="block">
+    <div class="sec-head">
+      <h3>买卖决策回测</h3>
+      <div class="sec-tools">
+        <label class="switch-inline">模型
+          <select id="btModel" style="padding:5px 9px;border-radius:7px;
+            border:1px solid var(--line2);background:var(--bg2);color:var(--fg2);font-size:12px"></select>
+        </label>
+        <label class="switch-inline" title="低仓位基金请勾选">
+          <input type="checkbox" id="btAuto"> 仓位自适应
+        </label>
+        <input type="date" id="btStart" class="date-in">
+        <span class="hint">至</span>
+        <input type="date" id="btEnd" class="date-in">
+        <button class="btn primary xs" id="btRun">运行回测</button>
+      </div>
+    </div>
+    <p class="note" id="btRule">基于拟合诊断的<b>风险门控</b>：R² 相对自身两年中枢的下降、
+      跟踪误差扩张倍数、实现 alpha 的 t 值、权重漂移速度四个分项（均为相对口径），
+      按「最差项 ×0.6 + 整体均值 ×0.4」合成「健康分」——
+      <b>单项抖动不足以动手，需要整体也在恶化</b>；连续 10 日 ≤ −0.5 才卖出离场，
+      回升至 −0.2 并持续才买回（阈值事先固定、不做事后优选）。
+      若 R² 低于 0.5（合成基准解释不了这只基金，常见于仓位假设失配），
+      门控<b>停用并保持持有</b>，不因模型失效而卖出。决策次日生效，成本按单边费率计提。
+      对照组为每个方案<b>各自的</b>恒定仓位（仓位 = 该方案的时间平均仓位），
+      只有平均仓位一致时差值才代表择时贡献。</p>
+
+    <div id="btOut" hidden>
+      <div class="panel"><h4>净值曲线对比</h4><div id="btChartEquity" class="chart"></div></div>
+      <div class="panel"><h4>健康分与持仓状态（0 空仓 / 1 持有）</h4>
+        <div id="btChartHealth" class="chart short"></div></div>
+      <div class="kpis small" id="btKpis"></div>
+      <div class="table-wrap"><table class="tbl" id="btMetrics"></table></div>
+      <h4>交易记录（决策日收盘、次一交易日执行）</h4>
+      <div class="table-wrap"><table class="tbl" id="btTrades"></table></div>
+    </div>
+  </section>
+
+  <!-- ---------- 净值走势 ---------- -->
+  <section class="block">
+    <div class="sec-head"><h3>净值走势与回撤</h3>
+      <div class="sec-tools"><span class="hint">开放式基金只有净值，无成交量，因此以收盘净值 + 涨跌幅呈现</span></div>
+    </div>
+    <div class="panel"><h4>累计净值</h4><div id="chartNav" class="chart tall"></div></div>
+    <div class="grid2">
+      <div class="panel"><h4>回撤曲线</h4><div id="chartDD" class="chart"></div></div>
+      <div class="panel"><h4>滚动 60 日年化波动</h4><div id="chartVol" class="chart"></div></div>
+    </div>
+    <div class="panel"><h4>月度收益（%）</h4><div id="chartMonthly" class="chart short"></div></div>
+  </section>
+
+  <!-- ---------- 相关性分析 ---------- -->
+  <section class="block">
+    <div class="sec-head"><h3>与指数的相关性分析</h3>
+      <div class="sec-tools"><label class="switch-inline">
+        滚动窗口 <input type="number" id="rollWin" value="120" min="30" max="500" step="10" style="width:70px"> 日
+      </label></div>
+    </div>
+
+    <div class="grid2">
+      <div class="panel">
+        <h4>相关性 Top 15</h4>
+        <div id="chartCorrBar" class="chart"></div>
+      </div>
+      <div class="panel">
+        <h4>各大类平均相关性</h4>
+        <div id="chartLayer" class="chart"></div>
+      </div>
+    </div>
+
+    <div class="panel"><h4>相关性矩阵（基金 × Top15 指数）</h4><div id="chartMatrix" class="chart"></div></div>
+
+    <div class="panel"><h4>滚动相关性演化（是否风格漂移）</h4><div id="chartRollCorr" class="chart"></div></div>
+    <div id="driftNote"></div>
+  </section>
+
+  <!-- ---------- 附录 ---------- -->
+  <section class="block">
+    <details class="tuner">
+      <summary>方法与口径说明</summary>
+      <div class="prose">
+        <h4>拟合做什么</h4>
+        <p>把基金日收益拆成候选指数收益的线性组合 <code>r_f ≈ Σ wᵢ·rᵢ</code>，
+        并强制 <code>wᵢ ≥ 0</code>、<code>Σwᵢ = 90%</code>（主动权益基金假设 9 成仓位）。
+        滚动窗口 252 日、每 20 日重估一次，权重只用 t 时刻之前的数据，
+        因此所有展示都是<b>样本外</b>的。</p>
+
+        <h4>样本外 R² 与窗口内 R² 的区别</h4>
+        <p><b>窗口内 R²</b>是模型在自己见过的数据上的拟合度，黑箱模型（树/核/神经）
+        天然接近 1，这<b>不代表它能预测</b>。真正可比的是<b>样本外 R²</b>：
+        用上一窗口拟合好的模型去预测下一段。两者差距大 = 过拟合。
+        排名一律按样本外 R²。</p>
+
+        <h4>两类模型的权重含义不同</h4>
+        <p>线性约束类（弹性网/Lasso/Ridge/TopK/PCR）的权重可以理解为
+        <b>一个真实可买的组合</b>；黑箱类（GBDT/RF/KRR/MLP）的权重只是重要性排序，
+        不可直接当成持仓。<b>选择时优先看可解释类模型。</b></p>
+
+        <h4>本工具不做什么</h4>
+        <p>本页面只回答「这只基金实际暴露在哪些风格上、拟合有多准、风格是否漂移」。
+        <b>它不产出买卖建议</b>：本项目已用 14 只基金 × 样本外检验证明，
+        日频尺度的趋势/偏离/估值信号无法创造超越「恒定仓位对照」的收益
+        （RankIC 均值 −0.059，13/14 只为负）。把拟合优度当择时信号是本项目最想避免的误用。</p>
+      </div>
+    </details>
+  </section>
+</main>
+
+<!-- ================= 空状态 ================= -->
+<div class="empty" id="empty">
+  <div class="empty-in">
+    <div class="empty-icon">◈</div>
+    <h2>输入基金代码开始</h2>
+    <p>系统会抓取该基金的复权净值与 43 个候选指数，做九种机器学习方法的滚动样本外拟合，
+       然后告诉你：它到底暴露在哪些风格上、哪个模型拟合最好、风格有没有漂移。</p>
+    <div class="chips" id="emptyChips"></div>
+  </div>
+</div>
+
+<div class="loading" id="loading" hidden><div class="spin"></div><span id="loadingTxt">加载中…</span></div>
+
+<script src="/vendor/echarts.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

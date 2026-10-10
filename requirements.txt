@@ -1,0 +1,8 @@
+akshare>=1.16
+pandas>=2.2
+numpy>=1.26
+scipy>=1.11
+scikit-learn>=1.4
+matplotlib>=3.8
+flask>=3.0          # Web 界面（webapp/）
+flask-cors>=4.0     # 允许跨域，便于前端单独部署
