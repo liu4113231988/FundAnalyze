@@ -247,6 +247,43 @@ def _cache_meta_write(name: str, meta: dict):
         pass
 
 
+def _os_replace_retry(src: Path, dst: Path, retries: int = 6):
+    """os.replace 带重试。Windows 下目标被另一线程短暂占用会抛 WinError 32。"""
+    import os
+    import time
+    for i in range(retries):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError:
+            if i == retries - 1:
+                raise
+            time.sleep(0.05 * (i + 1))
+
+
+def _atomic_csv_write(df: pd.DataFrame, path: Path):
+    """
+    原子写 CSV：先写同目录临时文件再 os.replace。
+
+    为什么需要：直接 to_csv 到目标路径，进程在写一半时被杀会留下**半截 CSV**，
+    下次读取虽然能兜底重建，但会白白多一次网络请求。
+    临时名必须每次唯一 —— Web 端是多线程，只加 pid 仍会撞名。
+    """
+    import os
+    import threading
+    import uuid
+    tmp = path.with_name(f"{path.name}.{os.getpid()}."
+                         f"{threading.get_ident()}.{uuid.uuid4().hex[:6]}.tmp")
+    try:
+        df.to_csv(tmp, encoding="utf-8-sig")
+        _os_replace_retry(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def _cached(name: str, builder, meta: Optional[dict] = None):
     fp = C.DATA_DIR / f"{name}.csv"
     stale = meta is not None and not _cache_meta_valid(name, meta)
@@ -265,10 +302,67 @@ def _cached(name: str, builder, meta: Optional[dict] = None):
         except Exception as e:      # noqa: BLE001
             print(f"[data] 缓存 {name} 损坏（{type(e).__name__}），重新构建")
     df = builder()
-    df.to_csv(fp, encoding="utf-8-sig")
+    _atomic_csv_write(df, fp)
     if meta is not None:
         _cache_meta_write(name, meta)
     return df
+
+
+# ------------------------------------------------------------------ 分层缓存
+def load_index_universe(start: str = C.START_DATE,
+                        end: Optional[str] = C.END_DATE,
+                        refresh: bool = False,
+                        verbose: bool = True) -> pd.DataFrame:
+    """
+    候选指数池的价格宽表（**全局缓存**，与基金无关）。
+
+    ★ 为什么要单独缓存：指数价格对一只基金和对另一只基金是同一份数据。
+    早期实现把它塞进 load_panel 的 per-fund 缓存里，于是每分析一只基金
+    都要重新抓 47 个指数 —— 扩池到 50 只就是 2350 次网络请求。
+    拆出来之后，无论分析多少只基金，指数只抓一次。
+
+    返回列 = 候选指数代码（不含 __FUND__），**未做对齐** —— 对齐依赖具体
+    基金的交易日轴，仍由 load_panel 做。
+    """
+    cache_name = f"index_universe_{start}" + (f"_to{end}" if end else "")
+    meta = {"v": C.DATA_CACHE_VERSION, "n_candidates": len(C.NAME_OF),
+            "start": start, "end": end}
+    if refresh:
+        for p in (C.DATA_DIR / f"{cache_name}.csv",
+                  C.DATA_DIR / f"{cache_name}.meta.json"):
+            if p.exists():
+                p.unlink()
+
+    def build() -> pd.DataFrame:
+        if verbose:
+            print(f"[data] 抓取候选指数池 {len(C.NAME_OF)} 个 ...")
+        return fetch_universe(C.NAME_OF.keys(), start, end, verbose=verbose)
+
+    return _cached(cache_name, build, meta=meta)
+
+
+def load_fund_nav_cached(fund_code: str, start: str = C.START_DATE,
+                         refresh: bool = False) -> pd.Series:
+    """
+    单只基金的累计净值（独立缓存，~100 KB，避免与指数抓取耦合）。
+
+    注意：_cached 统一走 CSV，读回来是 DataFrame，这里取第一列还原成 Series。
+    """
+    cache_name = f"fund_nav_{fund_code}_{start}"
+    meta = {"v": C.DATA_CACHE_VERSION, "code": fund_code, "start": start}
+    if refresh:
+        for p in (C.DATA_DIR / f"{cache_name}.csv",
+                  C.DATA_DIR / f"{cache_name}.meta.json"):
+            if p.exists():
+                p.unlink()
+
+    def build() -> pd.DataFrame:
+        return fetch_fund_nav(fund_code, start).to_frame()
+
+    df = _cached(cache_name, build, meta=meta)
+    s = df.iloc[:, 0] if isinstance(df, pd.DataFrame) else df
+    s.name = f"fund_{fund_code}"
+    return s
 
 
 def load_panel(fund_code: str, start: str = C.START_DATE,
@@ -276,31 +370,24 @@ def load_panel(fund_code: str, start: str = C.START_DATE,
                verbose: bool = True) -> pd.DataFrame:
     """
     返回对齐后的价格面板：列 = 候选指数 + __FUND__。
+
+    存储分层（★ 面板本身**不再缓存**，即时重建）：
+
+        指数池  index_universe_{start}.csv     全局一份（与基金无关）
+        净值    fund_nav_{code}_{start}.csv     每只一份（~100 KB）
+        面板    = 两者 → align_prices() 即时重建（纯内存，<100 ms）
+
+    为什么不缓存面板：面板里 95% 以上的列是指数，逐基金缓存会让同样的指数
+    数据存 N 份（1 MB × 基金数）。拆成两个原子数据源之后，存储与抓取量都从
+    O(基金 × 指数) 降到 O(基金 + 指数)；对齐是毫秒级内存操作，重建不亏。
     """
-    # ★ end 必须进缓存键：原键只有 (code, start)，改了 END_DATE 仍会命中旧缓存，
-    # 拿到一段已经被截取过的面板，而且不会有任何提示。
-    cache_name = f"panel_{fund_code}_{start}" + ("" if end is None else f"_to{end}")
-    meta = {"v": C.DATA_CACHE_VERSION, "code": fund_code,
-            "start": start, "end": end,
-            "n_candidates": len(C.NAME_OF)}
-    if refresh:
-        for p in (C.DATA_DIR / f"{cache_name}.csv",
-                  C.DATA_DIR / f"{cache_name}.meta.json"):
-            if p.exists():
-                p.unlink()
-
-    def build():
-        if verbose:
-            print(f"[data] 抓取基金净值 {fund_code} ...")
-        nav = fetch_fund_nav(fund_code, start)
-        if verbose:
-            print(f"       净值 {len(nav)} 行  {nav.index[0].date()} ~ {nav.index[-1].date()}")
-            print(f"[data] 抓取候选指数池 {len(C.NAME_OF)} 个 ...")
-        px = fetch_universe(C.NAME_OF.keys(), start, end, verbose=verbose)
-        px = align_prices(px, nav)
-        if verbose:
-            print(f"[data] 对齐后：{px.shape[0]} 交易日 × {px.shape[1]} 条序列 "
-                  f"({px.index[0].date()} ~ {px.index[-1].date()})")
-        return px
-
-    return _cached(cache_name, build, meta=meta)
+    nav = load_fund_nav_cached(fund_code, start, refresh=refresh)
+    if verbose:
+        print(f"[data] 基金 {fund_code} 净值 {len(nav)} 行  "
+              f"{nav.index[0].date()} ~ {nav.index[-1].date()}")
+    px = load_index_universe(start, end, refresh=refresh, verbose=verbose)
+    out = align_prices(px, nav)
+    if verbose:
+        print(f"[data] 对齐后：{out.shape[0]} 交易日 × {out.shape[1]} 条序列 "
+              f"({out.index[0].date()} ~ {out.index[-1].date()})")
+    return out

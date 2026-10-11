@@ -45,7 +45,14 @@ python webapp/serve.py --restart        # 启动后浏览器打开 http://127.0.
 python -m venv .venv && . .venv/Scripts/activate   # Windows Git Bash
 pip install -r requirements.txt
 
-# 2. 跑 4 只演示基金（首次约 90 秒，之后 6 秒）
+# 2. 数据预热（可选）：把基金净值与指数池抓到本地，之后可离线分析
+python warm_cache.py                # 预热默认样本；也可指定代码 / --refresh
+# 数据落在 output/data/：
+#   index_universe_{start}.csv   指数池，**全局一份**（与基金无关）
+#   fund_nav_{code}_{start}.csv  基金净值，每只一份（~50 KB）
+#   面板 = 两者对齐后即时重建，不落盘 —— 存储量与抓取量都是 O(基金+指数)
+
+# 3. 跑 4 只演示基金（首次约 90 秒，之后 6 秒）
 python run.py
 
 # 3. 指定基金 / 强制刷新数据
@@ -260,6 +267,7 @@ fund-index-lens/
 ├── run.py / run_experiments.py / run_extended.py
 ├── run_robustness.py            ⭐ 稳健性检验（n_eff / 共同因子 / bootstrap）
 ├── run_walkforward.py           ⭐ 按管理人分折验证参数是否过拟合
+├── warm_cache.py                数据预热（批量抓取到本地，支持离线分析）
 ├── build_report.py              生成 HTML 报告
 └── docs/研究方案.md
 ```
