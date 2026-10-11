@@ -111,6 +111,9 @@ def run_fund(code: str, name: str = "", refresh: bool = False,
         "weights_hist": fit["weights"], "fit_diag": fit["diag"],
         "syn_nav": syn_nav, "syn_ret": syn_ret,
         "signal": sig, "health": health,
+        # 健康门控的仓位列：下游要做成本敏感性（E10）等需要原始仓位序列，
+        # 而 backtest 只返回收益率序列，拿不到仓位。
+        "decision_pos": dec_pos, "decision_trades": dec_trades,
         "backtest": bt,
         "exposure": exposure, "snapshot": snap,
     }

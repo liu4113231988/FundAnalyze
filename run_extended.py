@@ -21,7 +21,8 @@ import pandas as pd
 
 from src import config as C, data as D
 from src.pipeline import run_fund, save_result
-from src.experiments import ic_term_structure, lowfreq_grid
+from src.experiments import (ic_term_structure, lowfreq_grid,
+                             cost_sensitivity, cost_durability)
 
 pd.set_option("display.width", 220)
 
@@ -30,7 +31,7 @@ def main():
     codes = sys.argv[1:] or list(C.EXTENDED_FUNDS.keys())
     t0 = time.time()
     pe = D.load_pe_panel(verbose=False)
-    per_fund, matrices, ics = [], [], []
+    per_fund, matrices, ics, costs = [], [], [], []
 
     for code in codes:
         name = C.EXTENDED_FUNDS.get(code, code)
@@ -71,6 +72,13 @@ def main():
                 "最优_策略年化": best["策略年化"],
                 "最优_对照年化": best["对照年化"],
             })
+
+            # E10 成本敏感性：日频择时（高换手）与健康门控（低换手）对比
+            cs = cost_sensitivity(
+                nav, res["signal"],
+                variants={"拟合健康决策": res["decision_pos"]})
+            cs.insert(0, "基金", name)
+            costs.append(cs)
             print(f"[{time.time()-t0:6.0f}s] {code} {name:16s} "
                   f"默认超额夏普={per_fund[-1]['默认_超额夏普']:+.3f}  "
                   f"最优={best['信号窗口']}日/{best['再平衡周期']}日 "
@@ -85,6 +93,9 @@ def main():
     mat.to_csv(out / "X2_扩展_周期矩阵.csv", index=False, encoding="utf-8-sig")
     e1 = pd.concat(ics)
     e1.to_csv(out / "X3_扩展_IC期限结构.csv", index=False, encoding="utf-8-sig")
+    cdf = pd.concat(costs, ignore_index=True) if costs else pd.DataFrame()
+    if not cdf.empty:
+        cdf.to_csv(out / "E10_成本敏感性.csv", index=False, encoding="utf-8-sig")
 
     print("\n" + "=" * 108)
     print(f"扩展样本 {len(pf)} 只基金 · 逐基金结果")
@@ -132,6 +143,46 @@ def main():
     print("=" * 108)
     print(e1.pivot_table(index="信号", columns="前瞻期", values="RankIC")
           [["5日", "20日", "60日", "120日", "250日"]].round(4).to_string())
+
+    # ---------------- E10 成本敏感性
+    if not cdf.empty:
+        cv = cdf[cdf["基金"].isin(valid_names)]
+        print("\n" + "=" * 108)
+        print("E10 · 成本敏感性：同一批方案在 3 档交易成本下的净贡献")
+        print("  本项目默认单边 0.15% 对应的是**场内 ETF**；场外主动基金的真实申赎")
+        print("  是申购 1.5% / 赎回 0.5%，差 10 倍以上。换手越高，越吃这一档差。")
+        print("=" * 108)
+        agg = cv.groupby(["方案", "成本档位"], as_index=False)[
+            ["年化换手", "超额夏普", "超额年化"]].mean()
+        agg["超额年化"] = agg["超额年化"]
+        order = {"场内ETF": 0, "场外C类": 1, "场外A类": 2}
+        agg = agg.sort_values(["方案", "成本档位"],
+                              key=lambda s: s.map(order) if s.name == "成本档位" else s)
+        show = agg.copy()
+        show["年化换手"] = show["年化换手"].round(2)
+        show["超额夏普"] = show["超额夏普"].round(3)
+        show["超额年化"] = (show["超额年化"] * 100).round(2).astype(str) + "%"
+        print(show.to_string(index=False))
+
+        print("\n各方案的成本耐久性（判据：超额年化 > 0）：")
+        dur = []
+        for name_ in cv["基金"].unique():
+            d = cost_durability(cv[cv["基金"] == name_])
+            if not d.empty:
+                d.insert(0, "基金", name_)
+                dur.append(d)
+        if dur:
+            dd = pd.concat(dur, ignore_index=True)
+            print(dd.groupby("方案").agg(
+                场内ETF=("场内ETF", "mean"),
+                场外C类=("场外C类", "mean"),
+                场外A类=("场外A类", "mean"),
+                最高可承受档位=("最高可承受档位",
+                              lambda s: s.value_counts().index[0]),
+            ).round(4).to_string())
+            print("\n  读法：超额年化为正 = 该方案在扣掉这一档成本后仍创造价值。")
+            print("  「最高可承受档位」= 仍为正的最高成本档，直接决定该策略"
+                  "只能用场内 ETF 还是也能用场外基金执行。")
 
     print(f"\n总耗时 {time.time()-t0:.0f}s  结果写入 {out}")
 

@@ -30,7 +30,7 @@ import pandas as pd
 from src import config as C, data as D
 from src.rbsa import RBSA
 from src.robustness import assess_positions
-from src.signal import SignalEngine
+from src.signal import SignalEngine, build_decision
 
 pd.set_option("display.width", 200)
 
@@ -85,23 +85,36 @@ def _report(res: dict) -> None:
 def main():
     codes = sys.argv[1:] or list(C.EXTENDED_FUNDS.keys())
     t0 = time.time()
-    nav_by, syn_by, pos_vt = {}, {}, {}
+    nav_by, pos_vt, pos_hg = {}, {}, {}
     for c in codes:
         panel = D.load_panel(c, verbose=False)
         fit = RBSA().fit_rolling(panel, verbose=False)
         syn = RBSA.synth_nav(fit["syn_ret"], 1.0)
-        nav_by[c] = panel["__FUND__"].reindex(syn.index)
-        syn_by[c] = syn
+        nav = panel["__FUND__"].reindex(syn.index)
+        nav_by[c] = nav
+        # 波动率目标：吃的是价格序列（内部自己算 log 收益）
         pos_vt[c] = SignalEngine().vol_target_channel(syn)["vol_target_pos"]
+        # 健康门控：★ 第 2 个参数必须是**收益率**（syn_ret），不是 synth_nav 价格。
+        # 传错会让 active = log(nav).diff() − 价格水平，量纲差两个数量级，
+        # 结果 c_alpha 恒饱和在 −1、门控变成"卖一次就永不回补"。
+        eng = SignalEngine()
+        h = eng.fit_health_channel(nav, fit["syn_ret"], fit["diag"],
+                                   fit["weights"])
+        dec, _tr = build_decision(h)
+        pos_hg[c] = dec.reindex(nav.index).ffill().fillna(1.0)
         print(f"[fit] {c} {C.EXTENDED_FUNDS[c]:16s} "
-              f"R²中位={fit['diag']['r2'].median():.3f}")
+              f"R²中位={fit['diag']['r2'].median():.3f}  "
+              f"门控交易={len(_tr)}")
 
     panel = D.load_panel(codes[0], verbose=False)
-    res_vt = assess_positions(nav_by, pos_vt, panel, label="波动率目标(逆波动)")
-    _report(res_vt)
-
+    jobs = (
+        ("拟合健康决策", pos_hg, "健康门控"),
+        ("波动率目标(逆波动)", pos_vt, "波动率目标"),
+    )
     out = C.RES_DIR
-    for res, tag in ((res_vt, "波动率目标"),):
+    for label, pos, tag in jobs:
+        res = assess_positions(nav_by, pos, panel, label=label)
+        _report(res)
         if not res.get("ok"):
             continue
         res["per_fund"].to_csv(out / f"E7_稳健性_{tag}_逐基金.csv",

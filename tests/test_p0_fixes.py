@@ -182,15 +182,15 @@ def t3():
     chk(any("跟踪误差" in t["reason"] for t in trades2),
         "卖出原因正确归因到「跟踪误差」分量")
 
-    # --- 3c 单一分量恶化**不应**触发（抗噪）：聚合是「最差项 0.6 + 整体 0.4」，
-    # 单独一项抖动不足以动手，否则会被最吵的那个分量牵着走。
-    h3 = eng.fit_health_channel(*_health_inputs(alpha_shift=-0.20))
+    # --- 3c 中等程度的单一分量恶化**不应**触发（抗噪）：聚合是
+    # 「最差项 0.6 + 整体 0.4」，单项轻微抖动不足以动手。
+    h3 = eng.fit_health_channel(*_health_inputs(alpha_shift=-0.08))
     st3 = health_stats(h3)
     chk(len(build_decision(h3)[1]) == 0,
-        f"仅 alpha 年化 -20%（c_alpha={h3['c_alpha'].min():+.2f}）→ 不触发"
+        f"仅 alpha 年化 -8%（c_alpha={h3['c_alpha'].min():+.2f}）→ 不触发"
         f"（健康分最低 {st3['min']:+.3f}），符合抗噪设计")
 
-    # --- 3c2 多分量共振才触发
+    # --- 3c2 极端 + 共振：一定触发
     nav4, syn4, diag4, w4 = _health_inputs(alpha_shift=-0.20)
     diag4 = diag4.copy()
     diag4.loc[diag4.index[len(diag4) // 2]:, "te"] *= 2.6      # TE 同时扩张
@@ -200,6 +200,13 @@ def t3():
     chk(st4["reachable"] and len(trades4) > 0,
         f"alpha 钝化 + TE 扩张 2.6x 共振 → 触发 {len(trades4)} 笔"
         f"（健康分最低 {st4['min']:+.3f}）")
+
+    # --- 3c2b 分量必须**实际能够参与**决策，而不是文档里的装饰。
+    # 实测 14 只基金 × 33152 个观测：刻度取 6 时 c_alpha 从未达到 −0.5（0.00%），
+    # 即"能力钝化"这个最有经济含义的失效模式完全无法参与风控。刻度 3 修复。
+    s_all = h3["c_alpha"].dropna()
+    chk(float(C.SIGNAL["health_alpha_t"]) <= 3.0,
+        f"alpha 分量刻度 = {C.SIGNAL['health_alpha_t']}（≤3 才能让该项进入告警区）")
 
     # --- 3c3 轻微跑输（噪声量级）绝不应触发
     h3b = eng.fit_health_channel(*_health_inputs(alpha_shift=-0.03))
@@ -325,10 +332,55 @@ def t6():
     if p.exists():
         p.unlink()
 
-    # end 必须进缓存键
-    k1 = f"panel_110022_2016-01-01"
-    k2 = f"panel_110022_2016-01-01_to2020-01-01"
-    chk(k1 != k2, "带 end 与不带 end 的缓存键不同（改 END_DATE 不再命中旧缓存）")
+    # ---- 分层缓存的行为语义（用计数 builder，不碰网络）
+    # 存储重构后 load_panel 不再落盘整块面板，改为「指数池全局一份 + 净值每只一份」，
+    # 面板即时重建。所以这里要测的是 _cached 的命中/失效语义，而不是某个键的拼法。
+    from src import config as C
+    calls = {"n": 0}
+
+    def _builder():
+        calls["n"] += 1
+        idx = pd.bdate_range("2020-01-01", periods=5, name="date")
+        return pd.DataFrame({"a": range(5), "b": range(5)}, index=idx)
+
+    name = "_t6layered"
+    for suffix in (".csv", ".meta.json"):
+        f = C.DATA_DIR / f"{name}{suffix}"
+        if f.exists():
+            f.unlink()
+
+    d1 = D._cached(name, _builder, meta={"v": 1})
+    n1 = calls["n"]
+    d2 = D._cached(name, _builder, meta={"v": 1})
+    n2 = calls["n"]
+    chk(n1 == 1 and n2 == 1,
+        f"二级加载命中缓存（builder 只被调用 {n1} 次，第二次未重算）")
+    chk(d1.equals(d2), "命中缓存与首次构建结果一致")
+
+    d3 = D._cached(name, _builder, meta={"v": 2})       # 版本变更 → 应判过期
+    chk(calls["n"] == 2, f"口径版本变更后重新构建（builder 累计 {calls['n']} 次）")
+    chk(d3.equals(d1), "重建结果与首次一致")
+
+    # 原子写不应留下临时文件
+    left = list(C.DATA_DIR.glob(f"{name}*.tmp"))
+    chk(not left, f"原子写无残留临时文件（{len(left)} 个）")
+    for suffix in (".csv", ".meta.json"):
+        f = C.DATA_DIR / f"{name}{suffix}"
+        if f.exists():
+            f.unlink()
+
+    # ---- 分层结构：指数池必须与基金净值分开存放
+    import inspect
+    sig_lp = inspect.signature(D.load_panel)
+    chk("fund_code" in sig_lp.parameters and "end" in sig_lp.parameters,
+        "load_panel 签名保持兼容（fund_code / start / end / refresh / verbose）")
+    for fn in ("load_index_universe", "load_fund_nav_cached",
+               "_atomic_csv_write", "_os_replace_retry"):
+        chk(hasattr(D, fn), f"分层缓存函数存在：{fn}")
+    # 指数池的缓存名不含基金代码 —— 这是"全局共享、不逐基金重复"的关键
+    src_txt = inspect.getsource(D.load_index_universe)
+    chk("index_universe_" in src_txt and "fund_code" not in src_txt,
+        "指数池缓存键与基金无关（全局一份，避免 N 份重复指数数据）")
 
     # 并发写同一缓存文件（两个相同请求不同 job_id 会撞同一路径）
     import pickle, threading
@@ -425,11 +477,62 @@ def t7():
         f"0.90→{a.fit_diag['r2'].median():.3f}  0.30→{b.fit_diag['r2'].median():.3f}")
 
 
+# ============================================================== T8 成本敏感性
+def t8():
+    print("\nT8 · 成本敏感性：成本影响必须与换手成正比")
+    from src.experiments import cost_sensitivity, cost_durability, COST_TIERS
+
+    rng = np.random.default_rng(5)
+    n = 1500
+    idx = pd.bdate_range("2018-01-02", periods=n, name="date")
+    nav = pd.Series(100 * np.exp(rng.normal(0.0002, 0.012, n).cumsum()),
+                    index=idx, name="fund")
+
+    # 方案A：逐日翻转（换手极高）  方案B：恒定 0.5（零换手，≡ 自己的对照）
+    alt = pd.Series(np.where(np.arange(n) % 2 == 0, 1.0, 0.0), index=idx)
+    flat = pd.Series(0.5, index=idx)
+    sig = pd.DataFrame({"position_final": alt, "score": pd.Series(0.5, index=idx)})
+
+    df = cost_sensitivity(nav, sig, variants={"零换手": flat}, costs=COST_TIERS)
+    rate = {c[0]: c[1] for c in COST_TIERS}
+    cols = [c[0] for c in COST_TIERS]          # ★ 必须按费率排序，
+    piv = df.pivot_table(index="方案", columns="成本档位",             # 否则
+                         values="超额年化").reindex(columns=cols)     # "首末档"
+    tur = df.groupby("方案")["年化换手"].first()                     # 会取错
+    hi_name = "择时策略(融合)"          # sig["position_final"] 对应的高换手方案
+    chk(tur[hi_name] > 100,
+        f"逐日翻转方案的年化换手 = {tur[hi_name]:.0f}x（确实是高换手）")
+
+    # 零换手方案：它就是自己的对照，任何成本档下净贡献都应精确为 0
+    zero = piv.loc["零换手"].dropna()
+    chk(zero.abs().max() < 1e-9,
+        f"零换手方案在 3 档成本下净贡献恒为 0（最大 {zero.abs().max():.2e}）")
+
+    # 高换手方案：净贡献随成本单调下降，且降幅≈ 换手 × Δ费率
+    hi = piv.loc[hi_name].dropna()
+    chk(hi.is_monotonic_decreasing,
+        "高换手方案的净贡献随成本单调下降："
+        + " → ".join(f"{v:.2%}" for v in hi.values))
+    predicted = (rate[cols[-1]] - rate[cols[0]]) * tur[hi_name]
+    actual = float(hi[cols[0]] - hi[cols[-1]])
+    chk(abs(actual - predicted) < 0.15 * max(abs(predicted), 1e-9),
+        f"成本影响量级正确：实测 {actual:.2%} vs 换手×Δ费率 = {predicted:.2%}"
+        f"（换手 {tur[hi_name]:.1f}）")
+
+    # 耐久性视图：零换手方案净贡献恰为 0（非正），高换手方案承受不了任何档
+    d = cost_durability(df)
+    dd = d.set_index("方案")["最高可承受档位"].to_dict()
+    chk(dd.get("零换手") == "无正贡献",
+        f"零换手方案的最高可承受档位 = {dd.get('零换手')}（净贡献为 0，不算正）")
+    chk(dd.get(hi_name) == "无正贡献",
+        f"高换手方案（换手 {tur[hi_name]:.0f}）在所有成本档下均无正贡献")
+
+
 def main():
     print("=" * 78)
     print("P0 修复回归验证")
     print("=" * 78)
-    for fn in (t1, t2, t3, t4, t5, t6, t7):
+    for fn in (t1, t2, t3, t4, t5, t6, t7, t8):
         try:
             fn()
         except Exception as e:                                # noqa: BLE001

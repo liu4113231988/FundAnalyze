@@ -196,6 +196,89 @@ def lowfreq_grid(nav: pd.Series, syn_nav: pd.Series, weights: pd.DataFrame,
     return pd.DataFrame(rows)
 
 
+# ====================================================================== E10 成本
+# 成本档位：(名称, 单边费率, 说明)
+COST_TIERS = (
+    ("场内ETF", 0.0015, "ETF/LOF 买卖佣金 + 冲击，本项目默认"),
+    ("场外C类", 0.0050, "C 类销售服务费摊薄 / 打折申购 + 赎回费"),
+    ("场外A类", 0.0150, "A 类原价申购 1.5%（未打折的最坏情形）"),
+)
+
+
+def cost_sensitivity(nav: pd.Series, sig: pd.DataFrame,
+                     cfg: Optional[dict] = None,
+                     variants: Optional[Dict[str, pd.Series]] = None,
+                     costs=COST_TIERS) -> pd.DataFrame:
+    """
+    E10 · 成本敏感性：同一组方案在多档交易成本下重跑。
+
+    ★ 为什么必须有这个实验：本项目默认单边 0.15%，那对应的是**场内 ETF**。
+    而场外主动基金的真实申赎是申购 1.5% / 赎回 0.5%（持有 < 7 天还有 1.5%
+    惩罚性赎回费），相差 10 倍以上。`docs/研究方案.md` §7.3 把这一条列为
+    "最容易被忽略的风险"，但此前只跑过最乐观的那一档。
+
+    换手越高，成本档位的影响越大，所以结果里必须同时给出年化换手 ——
+    否则看到"某策略在 1.5% 成本下崩掉"无法判断是策略的问题还是换手的问题。
+
+    注意：抬高成本对**恒定仓位对照**几乎没有影响（它只在建仓时换手一次），
+    所以成本上升会直接压低"净贡献"—— 这正是要量化的东西。
+    """
+    from .backtest import run_backtest
+
+    cfg = {**C.BACKTEST, **(cfg or {})}
+    rows = []
+    for label, rate, _note in costs:
+        bt = run_backtest(nav, sig, cfg={**cfg, "cost_rate": rate},
+                          variants=variants)
+        for v, tc in bt["timing_contrib_all"].items():
+            if not tc:
+                continue
+            rows.append({
+                "成本档位": label,
+                "单边费率": rate,
+                "方案": v,
+                "对照组": bt["controls"].get(v),
+                "年化换手": round(bt["turnover_all"].get(v, np.nan), 2),
+                "平均仓位": round(bt["avg_position_all"].get(v, np.nan), 4),
+                "年化收益": round(float(bt["metrics"].loc[v, "年化收益"]), 4),
+                "夏普": round(float(bt["metrics"].loc[v, "夏普"]), 4),
+                # 净贡献用超额序列的 IR 口径（夏普不可加）
+                "超额夏普": round(tc.get("夏普", np.nan), 4),
+                "超额年化": round(tc.get("年化收益", np.nan), 4),
+            })
+    return pd.DataFrame(rows)
+
+
+def cost_durability(cost_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    把 E10 的长表压成"每个方案在哪些成本档位下仍有正净贡献"的耐久性视图。
+
+    判据用**超额年化 > 0**（金额意义上的净贡献）。
+    不用超额夏普做跨档比较：成本上升时它的分子分母同时变，单看比率会误判 ——
+    一个方案可能"夏普排名上升但绝对超额转负"。
+    """
+    if cost_df.empty:
+        return pd.DataFrame()
+    piv = cost_df.pivot_table(index="方案", columns="成本档位",
+                              values="超额年化", aggfunc="mean")
+    order = [c[0] for c in COST_TIERS]
+    piv = piv.reindex(columns=[c for c in order if c in piv.columns])
+    rates = {c[0]: c[1] for c in COST_TIERS}
+    survive = []
+    for _, r in piv.iterrows():
+        # 标签用"无正贡献"而不是"全部为负"：净贡献恰为 0（方案 ≡ 自己的对照，
+        # 如零换手方案）既不是正贡献也不是负贡献，说成"为负"会误导。
+        last = "无正贡献"
+        for c in piv.columns:
+            if pd.notna(r[c]) and r[c] > 0:
+                last = c
+        survive.append(last)
+    out = piv.reset_index()
+    out["最高可承受档位"] = survive
+    out["单边费率上限"] = [rates.get(s) for s in survive]
+    return out
+
+
 # ====================================================================== 汇总
 def summarize_funds(results: Dict[str, dict]) -> pd.DataFrame:
     """跨基金汇总：择时净贡献与 IC 的一致性检验。"""
