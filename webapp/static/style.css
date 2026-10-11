@@ -221,6 +221,42 @@ table.tbl tr.clickable{cursor:pointer}
   transition:.16s;font-family:var(--mono)}
 .chip:hover{border-color:var(--accent);color:var(--accent)}
 
+/* ================= 指标提示（悬停解释） ================= */
+.mh{border-bottom:1px dashed var(--fg3);cursor:help;
+  transition:border-color .12s,color .12s}
+.mh .mi{display:inline-flex;align-items:center;justify-content:center;
+  width:12px;height:12px;margin-left:3px;border-radius:50%;
+  font-size:9px;font-style:normal;line-height:1;vertical-align:1px;
+  background:var(--panel2);border:1px solid var(--line2);color:var(--fg3);
+  transition:background .12s,border-color .12s,color .12s}
+.mh:hover{border-bottom-color:var(--accent);color:var(--fg)}
+.mh:hover .mi{background:var(--accent);border-color:var(--accent);color:#04121a}
+/* 表格里的表头：去掉虚线，只留 ? 图标，避免与表格边框混淆 */
+.tbl th .mh{border-bottom:none}
+.tbl th .mh:hover{color:var(--fg)}
+/* 深色浮层 */
+#mtip{position:fixed;z-index:99;width:410px;max-width:min(410px,92vw);
+  max-height:calc(100vh - 20px);box-sizing:border-box;
+  padding:13px 15px 14px;border-radius:11px;pointer-events:none;
+  background:var(--panel);border:1px solid var(--line2);
+  box-shadow:0 16px 40px rgba(0,0,0,.6);opacity:0;visibility:hidden;
+  transition:opacity .13s ease;font-size:12.5px;line-height:1.75;
+  color:var(--fg2)}
+#mtip.on{opacity:1;visibility:visible}
+#mtip .t-hd{font-size:13px;font-weight:600;color:var(--fg);
+  margin-bottom:8px;padding-left:10px;position:relative}
+#mtip .t-hd::before{content:'';position:absolute;left:0;top:3px;
+  width:3px;height:13px;border-radius:2px;background:var(--accent)}
+#mtip .t-row{margin-top:9px}
+/* 小标题用独立类，绝不能写成 `.t-row > b`——正文里的强调 <b> 也是直接子元素，
+   会被一并变成块级，把句子拆成一行一个词（实测踩过）。 */
+#mtip .t-k{display:block;margin-bottom:1px;color:var(--fg);
+  font-weight:600;font-size:11.5px;letter-spacing:.4px}
+#mtip code{background:var(--bg2);padding:1px 5px;border-radius:4px;
+  font-family:var(--mono);font-size:11.5px;color:#8fd0ff;
+  white-space:nowrap}
+#mtip b{color:var(--fg);font-weight:600}
+
 [hidden]{display:none!important}
 ::-webkit-scrollbar{width:9px;height:9px}
 ::-webkit-scrollbar-track{background:var(--bg)}

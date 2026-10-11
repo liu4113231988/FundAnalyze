@@ -174,8 +174,19 @@
 
     <div id="btOut" hidden>
       <div class="panel"><h4>净值曲线对比</h4><div id="btChartEquity" class="chart"></div></div>
-      <div class="panel"><h4>健康分与持仓状态（0 空仓 / 1 持有）</h4>
-        <div id="btChartHealth" class="chart short"></div></div>
+      <div class="panel"><h4><span class="mh" data-m="health_score">健康分<i class="mi">?</i></span>
+        与持仓状态（0 空仓 / 1 持有）
+        <span class="hint">· 虚线为
+          <span class="mh" data-m="exit_line">卖出线<i class="mi">?</i></span> /
+          <span class="mh" data-m="enter_line">买入线<i class="mi">?</i></span>，
+          两线之间为迟滞带</span></h4>
+        <div id="btChartHealth" class="chart short"></div>
+        <p class="note">健康分由四个拟合诊断分项合成，悬停下方任一名称可看定义：
+          <span class="mh" data-m="c_r2">R² 相对下降<i class="mi">?</i></span> ·
+          <span class="mh" data-m="c_te">TE 扩张倍数<i class="mi">?</i></span> ·
+          <span class="mh" data-m="c_alpha">alpha 的 t 值<i class="mi">?</i></span> ·
+          <span class="mh" data-m="c_drift">权重漂移速度<i class="mi">?</i></span></p>
+      </div>
       <div class="kpis small" id="btKpis"></div>
       <div class="table-wrap"><table class="tbl" id="btMetrics"></table></div>
       <h4>交易记录（决策日收盘、次一交易日执行）</h4>
@@ -228,7 +239,12 @@
       <div class="prose">
         <h4>拟合做什么</h4>
         <p>把基金日收益拆成候选指数收益的线性组合 <code>r_f ≈ Σ wᵢ·rᵢ</code>，
-        并强制 <code>wᵢ ≥ 0</code>、<code>Σwᵢ = 90%</code>（主动权益基金假设 9 成仓位）。
+        并强制 <code>wᵢ ≥ 0</code>、<code>Σwᵢ = γ</code>。
+        <code>γ</code> 默认开启<b>自适应</b>：由窗口内数据估计基金实际股票仓位
+        （<span class="mh" data-m="beta">隐含股票仓位<i class="mi">?</i></span>），
+        只在低仓位 / 对冲基金上才偏离 90%。若固定 90% 去拟合一只实际只有
+        30% 仓位的基金，合成基准的波动会被放大近 2 倍，
+        R² 会被系统性压到接近 0 —— 那不是风格识别失败，而是仓位失配。
         滚动窗口 252 日、每 20 日重估一次，权重只用 t 时刻之前的数据，
         因此所有展示都是<b>样本外</b>的。</p>
 
@@ -243,11 +259,37 @@
         <b>一个真实可买的组合</b>；黑箱类（GBDT/RF/KRR/MLP）的权重只是重要性排序，
         不可直接当成持仓。<b>选择时优先看可解释类模型。</b></p>
 
+        <h4>怎么判断「跨基金一致」是不是证据</h4>
+        <p>这是本项目最硬的一条教训。看到「14 只基金里 12 只为正」时，
+        第一个要问的不是"比例多高"，而是<b>这 14 只相当于几个独立观测</b>。
+        如果它们的超额收益高度同步（都靠同一个市场信号），
+        那 12/14 可能只相当于 3 只里的 2.5 只，
+        <b>「一致」是被重复计的同一个东西</b>。</p>
+        <p>三个量化工具，悬停查看定义：
+        <span class="mh" data-m="n_eff">有效独立样本量 n_eff<i class="mi">?</i></span>、
+        <span class="mh" data-m="pc1">第一主成分解释方差<i class="mi">?</i></span>、
+        <span class="mh" data-m="boot_p">移动块 bootstrap p 值<i class="mi">?</i></span>，
+        以及最严格的逐基金检验
+        <span class="mh" data-m="nw_t">Newey-West t 值<i class="mi">?</i></span>。</p>
+        <p>实测对比（同一批 14 只基金、同样的评价口径）：
+        长周期趋势 n_eff 2.30、第一主成分 63%、p = 0.147（不显著）；
+        健康门控 n_eff 8.80、第一主成分 16.5%、p = 0.029（显著）。
+        <b>同样的"N 只为正"，证据强度可以差一个量级</b> ——
+        差别不在结论，而在这些基金的超额是不是同一件事。</p>
+
         <h4>本工具不做什么</h4>
         <p>本页面只回答「这只基金实际暴露在哪些风格上、拟合有多准、风格是否漂移」。
         <b>它不产出买卖建议</b>：本项目已用 14 只基金 × 样本外检验证明，
-        日频尺度的趋势/偏离/估值信号无法创造超越「恒定仓位对照」的收益
-        （RankIC 均值 −0.059，13/14 只为负）。把拟合优度当择时信号是本项目最想避免的误用。</p>
+        日频尺度的趋势/偏离/估值信号无法创造超越
+        <span class="mh" data-m="control">恒定仓位对照<i class="mi">?</i></span>的收益
+        （<span class="mh" data-m="rank_ic">RankIC<i class="mi">?</i></span>
+        均值 −0.073，13/14 只为负）。
+        把拟合优度当择时信号是本项目最想避免的误用。</p>
+        <p>唯一通过完整统计检验的是下方的
+        <span class="mh" data-m="health_score">健康门控<i class="mi">?</i></span>
+        （详见上一节），但它效应量很小（场内 ETF 成本下年化仅 +0.42%），
+        且逐基金 Newey-West t 值 0/14 显著 ——
+        请以「低换手的风险体检」而非「择时信号」来理解它。</p>
       </div>
     </details>
   </section>
@@ -258,7 +300,7 @@
   <div class="empty-in">
     <div class="empty-icon">◈</div>
     <h2>输入基金代码开始</h2>
-    <p>系统会抓取该基金的复权净值与 43 个候选指数，做九种机器学习方法的滚动样本外拟合，
+    <p>系统会抓取该基金的复权净值与 47 个候选指数，做 11 种机器学习方法的滚动样本外拟合，
        然后告诉你：它到底暴露在哪些风格上、哪个模型拟合最好、风格有没有漂移。</p>
     <div class="chips" id="emptyChips"></div>
   </div>

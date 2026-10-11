@@ -26,6 +26,408 @@ const fmtPctSign = (v, d = 2) => (v === null || v === undefined || Number.isNaN(
 const UP = '#ef4a4a', DOWN = '#12b886', FLAT = '#8b98ab';
 const colOf = (v) => v > 0 ? UP : v < 0 ? DOWN : FLAT;
 
+// ============================================================ 指标词典
+// 每个指标给三段：是什么 / 怎么算 / 怎么看。
+// 写作原则：用大白话，不拿术语解释术语；「怎么看」必须给出可操作的判据
+//           （多大算大、方向如何、什么情况下会误导）。
+const METRICS = {
+  // ---------------- 净值与风险 ----------------
+  latest_nav: {
+    what: '复权后的累计净值，把历次分红再投资也算进去了。',
+    how: '用基金公布的<b>单位净值</b>与<b>累计净值</b>还原分红，再累乘得到；'
+      + '这样不同基金之间才可比。',
+    read: '只比较绝对高低没有意义（不同基金成立时点不同），'
+      + '要看它的<b>走势斜率</b>和<b>回撤幅度</b>。',
+  },
+  total_return: {
+    what: '整个统计区间内一共涨了多少（含分红再投资）。',
+    how: '<code>末值 / 初值 − 1</code>。',
+    read: '区间越长越容易“看起来很大”。2016 年至今的 10 年区间里，'
+      + '翻倍并不罕见，别把它当成“年化 100%”。',
+  },
+  ann_return: {
+    what: '把区间总收益折算成“平均每年赚多少”，方便跨基金、跨区间比较。',
+    how: '<code>(1 + 累计收益)^(252 / 交易日数) − 1</code>，'
+      + '按每年 252 个交易日折算。',
+    read: '这是<b>历史回溯</b>，不是预期收益。A 股主动权益基金'
+      + '在 2016 年以来的区间里，年化 10%~25% 都常见；'
+      + '但同一只基金换个起点就能差很多，<b>务必结合最大回撤一起看</b>。',
+  },
+  ann_vol: {
+    what: '收益的波动程度，也就是“净值上下颠簸得有多厉害”。',
+    how: '日收益的<b>标准差 × √252</b>（年化）。',
+    read: 'A 股主动权益基金通常 18%~28%。'
+      + '它衡量的是<b>颠簸</b>不是<b>亏损</b>，但颠簸大的基金在下跌段通常也更狠。',
+  },
+  vol60: {
+    what: '最近 60 个交易日（约 3 个月）的年化波动。',
+    how: '最近 60 日日收益标准差 × √252。',
+    read: '用来判断<b>当下</b>的风险水平是否比长期平均更高。'
+      + '明显高于历史年化波动时，说明市场正在剧烈变化，'
+      + '此时任何模型（包括本页的拟合）都会更不可靠。',
+  },
+  max_dd: {
+    what: '从历史最高点跌到最低点的最大幅度，衡量“最难受的时候有多难受”。',
+    how: '逐日计算 <code>当前净值 / 历史最高净值 − 1</code>，取最小值。',
+    read: '<b>这是持有体验的核心指标</b>，比年化收益更重要。'
+      + '主动权益基金 40%~60% 的回撤并不罕见。'
+      + '如果一次 50% 的回撤就会让你中途赎回，那这只基金就不适合你，'
+      + '无论它的年化多好看。',
+  },
+  monthly_win: {
+    what: '月度收益为正的月份占比。',
+    how: '统计所有完整自然月，算涨的月份比例。',
+    read: '长期看 55%~65% 属于正常。它和夏普相关但不等价：'
+      + '夏普还考虑了“赢的时候赢多少”。',
+  },
+  cumulative: {
+    what: '某个方案在回测区间内累计的收益（含交易成本）。',
+    how: '把每日净收益连乘起来。',
+    read: '和年化收益是同一件事的两种表达。'
+      + '看方案对比时，<b>年化更直观、累计更适合看绝对金额</b>。',
+  },
+
+  // ---------------- 拟合质量 ----------------
+  oos_r2: {
+    what: '样本外 R²：用“上一段时间学到的指数组合”去解释“接下来一段”的基金收益，'
+      + '能解释掉多少比例的波动。',
+    how: '滚动窗口 252 日拟合一次，权重冻结；'
+      + '下一段用这组权重合成基准，算 <code>1 − 残差方差 / 基金方差</code>。',
+    read: '<b>这是本页所有排名的唯一依据。</b>'
+      + '0.9 以上说明风格清晰且稳定；'
+      + '0.6~0.8 属于风格不鲜明或正在变化；'
+      + '低于 0.5 通常意味着<b>仓位假设失配</b>（见「隐含股票仓位」）'
+      + '而不是"没有风格"，应先看那条提示再下结论。',
+  },
+  fit_r2: {
+    what: '窗口内 R²：模型在它“自己见过”的那些数据上的拟合度。',
+    how: '每个滚动窗口内直接算 <code>1 − 残差方差 / 基金方差</code>。',
+    read: '<b>高不代表能预测</b>。树模型、核方法、神经网络这类黑箱'
+      + '天然能把这个数做到 1.00，那只是“背下了历史”。'
+      + '所以它不能用来排名，只能用来和样本外 R² 对比。',
+  },
+  gap: {
+    what: '过拟合程度：窗口内 R² 比样本外 R² 高多少。',
+    how: '<code>窗口内 R² − 样本外 R²</code>。',
+    read: '经验判据：<b>&gt; 0.08 就算过拟合明显</b>，'
+      + '说明模型学到的那些细节换到新数据就不成立了。'
+      + '黑箱模型这个差值通常远大于线性约束类，'
+      + '这也是本页优先推荐可解释模型的理由。',
+  },
+  oos_te: {
+    what: '年化跟踪误差：基金实际收益与合成基准收益之间偏离的幅度。',
+    how: '<code>日残差的标准差 × √252</code>（样本外口径）。',
+    read: '和 R² 是同一件事的两面：<b>TE 越小 = 基金越像那个指数组合</b>。'
+      + '主动基金一般 4%~10%；'
+      + '超过 12% 说明它要么风格很不稳定，要么仓位假设不对。',
+  },
+  win: {
+    what: '方向一致率：基金和合成基准当天“同涨同跌”的比例。',
+    how: '统计 <code>sign(基金日收益) == sign(基准日收益)</code> 的天数占比。',
+    read: '这是比 R² 更“粗糙”但更直观的指标，正常在 60%~75%。'
+      + '它高而 R² 低，通常说明<b>方向对但幅度不对</b>（仓位差）；'
+      + '两者都低才是真的没拟合上。',
+  },
+  beta: {
+    what: '隐含股票仓位：模型反推出的“这只基金有多少钱真的买了股票”。',
+    how: '不做固定 90% 的假设，而是让模型自己去估计'
+      + '“基金总波动 / 基准波动”这个比例（即隐含 β）。'
+      + '只在【仓位约束自适应】开启时生效。',
+    read: '<b>这是全页最容易误判的一项。</b>'
+      + '如果它显著低于 90%（例如 30%），'
+      + '说明合成基准按满仓构建、而基金其实大半是债或现金，'
+      + '于是<b>低 R² 反映的是仓位差异，不是风格识别失败</b>。'
+      + '遇到这种情况请把「仓位约束自适应」打开重跑。',
+  },
+  vol_ratio: {
+    what: '合成基准的波动是基金自身波动的几倍。',
+    how: '<code>基准年化波动 / 基金年化波动</code>。',
+    read: '正常接近 1。远大于 1（比如 2 倍以上）'
+      + '说明基准“太猛”了，通常就是仓位假设过高造成的，'
+      + '此时 R² 会被系统性压低。',
+  },
+  n_weights: {
+    what: '有效权重数：这只基金实际被归因到了几个指数上。',
+    how: '统计权重超过阈值（如 1%）的指数个数。',
+    read: '3~6 个最可读；'
+      + '几十个说明权重被摊薄成了噪声，'
+      + '这时“食品饮料 59% + 家用电器 24%”那种清晰结论就不成立了。',
+  },
+  elapsed: {
+    what: '该模型完成全部滚动拟合所用的时间（秒）。',
+    how: '实测墙钟时间。',
+    read: '只影响使用体验。'
+      + '但它常常和复杂度相关：<b>耗时高、样本外 R² 却不高的模型，'
+      + '性价比就是负的</b>。',
+  },
+  interpretable: {
+    what: '该模型的权重能不能当成“真实可买的持仓组合”来读。',
+    how: '线性约束类（弹性网 / Lasso / Ridge / TopK / PCR）可解释；'
+      + '树 / 核 / 神经网络类不可解释。',
+    read: '<b>这是选择模型时最该优先看的一列。</b>'
+      + '黑箱模型输出的数字只是“重要性排序”，'
+      + '不能理解成“这只基金买了 30% 白酒”，照着它调仓会出错。',
+  },
+
+  // ---------------- 回测评价 ----------------
+  sharpe: {
+    what: '夏普比率：每承担一单位波动能换来多少超额收益。',
+    how: '<code>(年化收益 − 无风险利率) / 年化波动</code>。',
+    read: '长期 0.5 以上算不错，1.0 以上很好。'
+      + '但它<b>对“低仓位”有天然偏爱</b>——仓位低、波动小，夏普就好看。'
+      + '所以本页必须配「恒定仓位对照」一起看，'
+      + '单看夏普会被仓位差异骗到。',
+  },
+  calmar: {
+    what: 'Calmar 比率：年化收益 ÷ 最大回撤。',
+    how: '<code>年化收益 / |最大回撤|</code>。',
+    read: '它比夏普更贴近持有体验，因为它惩罚的是<b>最难受的那一段</b>'
+      + '而不是平均颠簸。0.5 以上算健康。',
+  },
+  avg_pos: {
+    what: '该方案在回测区间内的平均持仓比例（时间加权）。',
+    how: '对每日仓位取时间平均，不是“买卖次数平均”。',
+    read: '<b>读所有超额指标前必须先看这个数。</b>'
+      + '平均仓位 40% 的策略天然比 100% 的少赚、少跌，'
+      + '直接比收益毫无意义。'
+      + '这正是本页为每个方案单独配一个「恒定仓位对照」的原因。',
+  },
+  turnover: {
+    what: '年化换手：平均每年要买卖相当于整个持仓多少倍的量。',
+    how: '把每日仓位变动绝对值累加，再除以年数。'
+      + '买一次卖一次（0%→100%→0%）计为 2。',
+    read: '<b>换手是交易成本敏感度的直接放大器</b>'
+      + '（成本影响 ≈ 换手 × 单边费率）。'
+      + '年换手 0.3 意味着三年才动一次，几乎不受费率影响；'
+      + '年换手 1.4 意味着成本从 0.15% 抬到 1.5% 时'
+      + '净贡献会多掉约 1.9 个百分点。'
+      + '场外基金真实申赎费率是场内 ETF 的十倍，'
+      + '所以高换手策略基本只能在场内执行。',
+  },
+  rank_ic: {
+    what: 'RankIC：当日信号排名与未来收益排名的相关性。',
+    how: '每日算信号值与未来 5 日收益的<b>秩相关</b>，再取时间平均。',
+    read: '正数 = 信号方向对（信号高→未来涨得多）。'
+      + '日频择时里 |RankIC| 能稳定到 0.03 已属不易。'
+      + '<b>本项目 14 只基金实测均值为负</b>，'
+      + '所以这个数在这里主要起“证伪”作用。',
+  },
+  icir: {
+    what: 'ICIR：RankIC 的稳定性，即“信号方向对得有多一贯”。',
+    how: '<code>RankIC 均值 / RankIC 标准差</code>。',
+    read: '比单看 RankIC 更严格：均值高但不稳定（ICIR 低）'
+      + '意味着信号只在少数时段有效，'
+      + '<b>这种策略在实盘上会赚赚赔赔然后被手续费磨平</b>。',
+  },
+  timing_contrib: {
+    what: '择时净贡献：该方案相对它<b>自己那份</b>恒定仓位对照的超额。',
+    how: '<code>方案指标 − 同平均仓位恒定仓位方案的指标</code>。',
+    read: '<b>这是本项目唯一认可的“择时能力”度量。</b>'
+      + '为什么必须各自配对：平均仓位 100% 的方案减去平均 43% 的对照，'
+      + '会凭空得到 +12% 的“超额年化”，那纯粹是仓位差。'
+      + '只有平均仓位一致时，差值才代表择时。'
+      + '接近 0 = 择时没有价值；为正才说明真的择对了。',
+  },
+  control: {
+    what: '恒定仓位对照：一个“死拿着不动”的基准方案。',
+    how: '仓位固定等于被测方案的时间平均仓位，'
+      + '只在建仓时交易一次，之后永不调仓。',
+    read: '它的作用是回答：<b>“如果我只是保持同样的平均仓位、'
+      + '完全不做择时，结果会怎样？”</b>'
+      + '被测方案跑不赢它，就说明所有交易都是负价值。',
+  },
+  health_score: {
+    what: '健康分：把四个拟合诊断压缩成的一个 −1 ~ +1 的分数，'
+      + '用来判断“这只基金的风格模型还准不准”。',
+    how: '四个诊断分项（R² 相对下降、TE 扩张、alpha 的 t 值、权重漂移速度）'
+      + '各映射到 [−1, +1]，再按 <code>最差项 × 0.6 + 整体均值 × 0.4</code> 合成。',
+    read: '<b>接近 +1 = 一切正常，无需动作。</b>'
+      + '之所以要“最差项占大头”，是因为四个分量描述的是'
+      + '互相独立的失效模式，任何一个严重恶化都值得警惕；'
+      + '而“整体均值”那一项是为了防止被最吵的单个分量牵着走——'
+      + '<b>单项抖动不足以动手，需要整体也在恶化</b>。',
+  },
+  exit_line: {
+    what: '离场线：健康分跌破它并<b>持续 10 个交易日</b>才真正卖出。',
+    how: '默认 −0.5，事先固定，不依据回测结果调整。',
+    read: '要求“连续 10 日”是为了滤掉单日尖峰（例如某天 TE 异常跳升）。'
+      + '这个阈值不是调优出来的，而是按<b>各分量自身的噪声幅度</b>标定的，'
+      + '所以不应再拿回测表现去回调它。',
+  },
+  enter_line: {
+    what: '买入线：健康分回升到它之上并持续，才重新买入。',
+    how: '默认 −0.2。',
+    read: '它与离场线之间的 −0.5 ~ −0.2 叫<b>迟滞带</b>，'
+      + '作用是防止健康分在阈值附近来回穿梭时'
+      + '把仓位反复买卖、被手续费磨死。',
+  },
+  c_r2: {
+    what: '拟合优度的恶化程度：当前的 R² 比它自己两年来的常态低多少。',
+    how: '<code>(当前R² − 两年中位R²) / 20pp</code>，截断到 [−1, +1]。',
+    read: '用<b>相对自身</b>而不是绝对水位，'
+      + '是因为不同基金的 R² 天生差很多'
+      + '（消费类 0.95、轮动型 0.6）。'
+      + '用绝对阈值判“不健康”，等于永久判低 R² 的基金出局。',
+  },
+  c_te: {
+    what: '跟踪误差的扩张倍数：现在的 TE 是常态的几倍。',
+    how: '<code>(1.6 − 当前TE/两年中位TE) / 0.6</code>，截断到 [−1, +1]。',
+    read: 'TE 扩张说明<b>基金的风险结构变了</b>'
+      + '（可能是风格切换、也可能是基金经理在赌方向）。'
+      + '扩张 60% 归零、扩张 120% 触底。',
+  },
+  c_alpha: {
+    what: '实现 alpha 的显著性：基金相对<b>自己的复制组合</b>跑赢还是跑输，'
+      + '这个偏离在统计上有多可信。',
+    how: '先算超额收益的 t 值（2 年滚动窗口），'
+      + '再 <code>t / 3</code> 截断到 [−1, +1]。',
+    read: '这是四个分量里<b>经济含义最清晰</b>的一个：'
+      + '判断的是“基金经理的选股能力是否真的在衰减”。'
+      + '之所以用 t 值而不是原始 alpha，'
+      + '是因为原始 alpha 的噪声比它本身还大得多。'
+      + '<code>t ≤ −3</code>（约年化跑输 13%）才算严重钝化。',
+  },
+  c_drift: {
+    what: '风格漂移速度：模型权重相对上一次重估变了多少。',
+    how: '<code>Σ|Δw|</code> 再取 3 日平滑，'
+      + '与自身两年常态比较，换算到 [−1, +1]。',
+    read: '漂移剧烈说明<b>风格不稳定</b>——'
+      + '今天消费明天科技，那么“风格穿透”的结论本身就靠不住了。'
+      + '注意 20 日重估的基金天生漂移更大，所以同样必须用相对口径。',
+  },
+
+  // ---------------- 稳健性统计 ----------------
+  n_eff: {
+    what: '有效独立样本量：N 只基金的“超额收益”在统计上相当于几个互不相关的观测。',
+    how: '<code>(Σλ)² / Σλ²</code>，λ 是横截面相关矩阵的特征值。',
+    read: '<b>本项目最核心的一条方法论。</b>'
+      + '14 只基金如果超额高度同步（都靠同一个市场信号），'
+      + 'n_eff 可能只有 2~3，那“14 只里 12 只为正”≈“3 只里 2.5 只为正”，'
+      + '证据强度被严重高估。'
+      + '实测：长周期趋势 n_eff=2.30（几乎无用），'
+      + '健康门控 n_eff=8.80（真的接近 14 份证据）。'
+      + '<b>看到任何“N 只为正”的结论，先问 n_eff 是多少。</b>',
+  },
+  boot_p: {
+    what: '移动块 bootstrap 的 p 值：'
+      + '“如果策略完全没有预测能力，出现当前这种结果的可能性有多大”。',
+    how: '先把每只基金的超额序列减去均值（构造“无能力”的零假设），'
+      + '再用 60 日移动块重采样 2000 次。'
+      + '<b>所有基金共用同一组重采样日期</b>，'
+      + '否则等于假设 14 个观测互不相关，恰好抹掉要检验的东西。',
+    read: '<b>小于 0.05 才算显著。</b>'
+      + '本项目实测：长周期趋势 0.147、波动率目标 0.432（都不显著），'
+      + '健康门控 0.029（显著）。'
+      + '注意 p 值只回答“是不是运气”，不回答“能赚多少钱”——'
+      + '仍要结合效应量一起看。',
+  },
+  pc1: {
+    what: '第一主成分解释方差：14 只基金的超额收益里，'
+      + '有多少比例可以被<b>同一个共同因子</b>解释。',
+    how: '对超额收益矩阵做 PCA，取最大特征值占总特征值的比例。',
+    read: '越低越好。'
+      + '超过 50% 说明这些基金的“超额”其实大部分是同一个信号，'
+      + '“跨基金一致”就是假的一致。'
+      + '实测：长周期趋势 63%（几乎全同步）、健康门控 16.5%（各自独立）。',
+  },
+  nw_t: {
+    what: 'Newey-West t 值：单只基金的超额收益在统计上是否显著（已修正自相关）。',
+    how: '对超额序列做 NW 自相关调整后算 t 值，|t| > 1.96 即 5% 水平显著。',
+    read: '这是<b>最严格的逐基金检验</b>。'
+      + '本项目三个策略都是 0/14 显著 —— '
+      + '说明没有任何单只基金的超额站得住，'
+      + '显著性（如果有）完全来自横截面聚合。'
+      + '这一点必须如实报告，不能只报 p 值。',
+  },
+};
+
+// ------------------------------------------------ 提示触发器
+// 用法：mh('oos_r2', '样本外 R²') → 带下划线与 ? 图标、可悬停解释的标签
+function mh(key, text) {
+  if (!METRICS[key]) return text;
+  return `<span class="mh" data-m="${key}">${text}<i class="mi">?</i></span>`;
+}
+
+// 全局浮层：hover 触发（桌面），click 触发（触屏）
+(function initMetricTip() {
+  const tip = document.createElement('div');
+  tip.id = 'mtip';
+  document.body.appendChild(tip);
+  let cur = null;
+
+  // 放置策略：优先正下方 → 正上方 → 右侧 → 左侧 → 强制钳位。
+  // 之所以要「左右」这一档：解释文字较长（300~400px 高），
+  // 在 600px 以下的窗口里上下都放不下，只钳到角落会正好盖住被悬停的标签，
+  // 用户一边看解释一边看不到自己在问哪个指标。
+  function place(el) {
+    const r = el.getBoundingClientRect();
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const M = 8;
+    const clampX = (x) => Math.max(M, Math.min(x, vw - tw - M));
+    const clampY = (y) => Math.max(M, Math.min(y, vh - th - M));
+
+    // 1) 正下方   2) 正上方（水平居中于标签）
+    if (r.bottom + 9 + th <= vh - M) {
+      tip.style.left = clampX(r.left + r.width / 2 - tw / 2) + 'px';
+      tip.style.top = (r.bottom + 9) + 'px';
+      return;
+    }
+    if (r.top - th - 9 >= M) {
+      tip.style.left = clampX(r.left + r.width / 2 - tw / 2) + 'px';
+      tip.style.top = (r.top - th - 9) + 'px';
+      return;
+    }
+    // 3) 右侧   4) 左侧（垂直居中于标签）
+    const yc = clampY(r.top + r.height / 2 - th / 2);
+    if (r.right + 9 + tw <= vw - M) {
+      tip.style.left = (r.right + 9) + 'px';
+      tip.style.top = yc + 'px';
+      return;
+    }
+    if (r.left - tw - 9 >= M) {
+      tip.style.left = (r.left - tw - 9) + 'px';
+      tip.style.top = yc + 'px';
+      return;
+    }
+    // 5) 都放不下（窗口极小）：钳位兜底
+    tip.style.left = clampX(r.left + r.width / 2 - tw / 2) + 'px';
+    tip.style.top = clampY(r.bottom + 9) + 'px';
+  }
+
+  function show(el) {
+    const m = METRICS[el.dataset.m];
+    if (!m) return;
+    // ★ 小标题必须用独立的类（.t-k），不能用 <b>：
+    //   CSS 里若写成 `.t-row > b{display:block}`，会把正文里所有作强调用的
+    //   <b> 一并变成块级元素，句子会被拆成一行一个词。
+    tip.innerHTML = `<div class="t-hd">${m.title || el.textContent.trim()}</div>`
+      + `<div class="t-row"><span class="t-k">是什么</span>${m.what}</div>`
+      + (m.how ? `<div class="t-row"><span class="t-k">怎么算</span>${m.how}</div>` : '')
+      + (m.read ? `<div class="t-row"><span class="t-k">怎么看</span>${m.read}</div>` : '');
+    tip.classList.add('on');
+    cur = el;
+    place(el);
+  }
+  function hide() { tip.classList.remove('on'); cur = null; }
+
+  // 单一 mouseover 处理器：进入 .mh 就显示，离开到别处就隐藏。
+  // 比 mouseover + mouseout 配对更稳（子元素 i.mi 会造成边界抖动）。
+  document.addEventListener('mouseover', (e) => {
+    const el = e.target.closest ? e.target.closest('.mh') : null;
+    if (!el) { if (cur) hide(); return; }
+    if (el !== cur) show(el);
+  });
+  // 触屏：点一下显示，点别处收起；滚轮/滚动时收起
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest ? e.target.closest('.mh') : null;
+    if (el) { el === cur ? hide() : show(el); }
+    else hide();
+  });
+  window.addEventListener('scroll', hide, true);
+  window.addEventListener('resize', hide);
+})();
+
 async function api(path, opts) {
   const r = await fetch(path, opts);
   if (!r.ok && r.status !== 202) {
@@ -255,11 +657,16 @@ function renderHead() {
 
   const bm = r.models[S.best];
   const kpi = [
-    { lb: '最新累计净值', vl: fmtNum(st.latest, 4), sb: `累计 ${fmtPctSign(st.total_return)}` },
-    { lb: '年化收益', vl: fmtPctSign(st.ann_return, 1), sb: `年化波动 ${fmtPct(st.ann_vol, 1)}` },
-    { lb: '最大回撤', vl: fmtPct(st.max_drawdown, 1), sb: `当前 60日波动 ${fmtPct(st.current_vol60, 1)}`, cls: 'bad' },
-    { lb: '拟合模型', vl: bm ? bm.name.slice(0, 8) : '—', sb: bm ? `样本外R² ${fmtNum(bm.metrics.oos_r2, 3)}` : '', cls: 'good' },
-    { lb: '跟踪误差', vl: bm ? fmtPct(bm.metrics.oos_te, 1) : '—', sb: bm ? `方向一致 ${fmtPct(bm.metrics.win, 1)}` : '' },
+    { lb: mh('latest_nav', '最新累计净值'), vl: fmtNum(st.latest, 4),
+      sb: `${mh('total_return', '累计')} ${fmtPctSign(st.total_return)}` },
+    { lb: mh('ann_return', '年化收益'), vl: fmtPctSign(st.ann_return, 1),
+      sb: `${mh('ann_vol', '年化波动')} ${fmtPct(st.ann_vol, 1)}` },
+    { lb: mh('max_dd', '最大回撤'), vl: fmtPct(st.max_drawdown, 1),
+      sb: `${mh('vol60', '当前 60日波动')} ${fmtPct(st.current_vol60, 1)}`, cls: 'bad' },
+    { lb: '拟合模型', vl: bm ? bm.name.slice(0, 8) : '—',
+      sb: bm ? `${mh('oos_r2', '样本外R²')} ${fmtNum(bm.metrics.oos_r2, 3)}` : '', cls: 'good' },
+    { lb: mh('oos_te', '跟踪误差'), vl: bm ? fmtPct(bm.metrics.oos_te, 1) : '—',
+      sb: bm ? `${mh('win', '方向一致')} ${fmtPct(bm.metrics.win, 1)}` : '' },
   ];
   $('kpis').innerHTML = kpi.map(k => `
     <div class="kpi ${k.cls || ''}">
@@ -315,8 +722,10 @@ function renderRank() {
   const r = S.result;
   const rows = r.rank;
   const maxR2 = Math.max(...rows.map(x => x['样本外R²'] ?? 0), 0.0001);
-  const head = ['模型', '流派', '可解释', '样本外 R²', '年化 TE', '窗口内 R²',
-    '训练/样本外差', '方向一致', '隐含仓位', '耗时(s)'];
+  const head = ['模型', '流派', mh('interpretable', '可解释'),
+    mh('oos_r2', '样本外 R²'), mh('oos_te', '年化 TE'), mh('fit_r2', '窗口内 R²'),
+    mh('gap', '训练/样本外差'), mh('win', '方向一致'), mh('beta', '隐含仓位'),
+    mh('elapsed', '耗时(s)')];
   const html = `<thead><tr>${head.map((h, i) =>
     `<th class="${i < 3 ? 'l' : ''}">${h}</th>`).join('')}</tr></thead><tbody>` +
     rows.map(x => {
@@ -374,15 +783,21 @@ function renderSelected() {
   const betaLow = beta !== null && beta !== undefined &&
     Math.abs(beta) < eq * 0.7;
   const kpi = [
-    { lb: '样本外 R²', vl: fmtNum(m.metrics.oos_r2, 4), sb: '排序依据', cls: 'good' },
-    { lb: '年化跟踪误差', vl: fmtPct(m.metrics.oos_te, 1), sb: '越低越贴合' },
-    { lb: '窗口内 R²', vl: fmtNum(m.metrics.fit_r2_mean, 4), sb: '训练集拟合度' },
-    { lb: '训练−样本外', vl: fmtSign(gap, 3), sb: gap > 0.08 ? '过拟合明显' : '差距可控',
+    { lb: mh('oos_r2', '样本外 R²'), vl: fmtNum(m.metrics.oos_r2, 4),
+      sb: '排序依据', cls: 'good' },
+    { lb: mh('oos_te', '年化跟踪误差'), vl: fmtPct(m.metrics.oos_te, 1),
+      sb: '越低越贴合' },
+    { lb: mh('fit_r2', '窗口内 R²'), vl: fmtNum(m.metrics.fit_r2_mean, 4),
+      sb: '训练集拟合度' },
+    { lb: mh('gap', '训练−样本外'), vl: fmtSign(gap, 3),
+      sb: gap > 0.08 ? '过拟合明显' : '差距可控',
       cls: gap > 0.08 ? 'warn' : '' },
-    { lb: '隐含股票仓位', vl: fmtPct(beta, 0), sb: `基准波动/基金 ${fmtNum(vr, 1)}×`,
+    { lb: mh('beta', '隐含股票仓位'), vl: fmtPct(beta, 0),
+      sb: `${mh('vol_ratio', '基准波动/基金')} ${fmtNum(vr, 1)}×`,
       cls: betaLow ? 'warn' : '' },
-    { lb: '方向一致率', vl: fmtPct(m.metrics.win, 1), sb: '涨跌方向命中' },
-    { lb: '有效权重数', vl: m.metrics.n_weights, sb: `更新于 ${m.weights_last_date || '—'}` },
+    { lb: mh('win', '方向一致率'), vl: fmtPct(m.metrics.win, 1), sb: '涨跌方向命中' },
+    { lb: mh('n_weights', '有效权重数'), vl: m.metrics.n_weights,
+      sb: `更新于 ${m.weights_last_date || '—'}` },
   ];
   $('selKpis').innerHTML = kpi.map(x => `
     <div class="kpi ${x.cls || ''}"><div class="lb">${x.lb}</div>
@@ -958,22 +1373,33 @@ function drawBtHealth(p) {
 
 function renderBtKpis(p) {
   const main = p.metrics.find(x => x['方案'] && x['方案'].includes('健康')) || p.metrics[0];
-  const tc = p.summary.timing_contrib || {};
+  const nm = main['方案'];
+  // ★ 净贡献 / 平均仓位 / 对照必须取**这一行自己的**值，不能拿主策略的。
+  // 早先的实现：指标取「拟合健康决策」行，但 tc 与对照取的是
+  // "择时策略(融合)"的 —— 两个不同方案的数被拼在同一张卡上。
+  // 平均仓位 100% 的门控配 45% 的对照，会出现"择时贡献"看起来很大的假象。
+  const tc = (p.summary.timing_contrib_all || {})[nm]
+    || p.summary.timing_contrib || {};
+  const posAll = p.summary.avg_position_all || {};
+  const ctrlAll = p.summary.controls || {};
+  const avgPos = (nm in posAll) ? posAll[nm] : p.summary.avg_position;
+  const ctrlName = ctrlAll[nm] || p.summary.control_name;
   const cards = [
-    { lb: '年化收益', vl: fmtPctSign(main['年化收益'], 1),
-      sb: `择时贡献 ${fmtPctSign(tc['年化收益'])}`,
+    { lb: mh('ann_return', '年化收益'), vl: fmtPctSign(main['年化收益'], 1),
+      sb: `${mh('timing_contrib', '择时贡献')} ${fmtPctSign(tc['年化收益'])}`,
       cls: main['年化收益'] > 0 ? 'good' : 'bad' },
-    { lb: '夏普比率', vl: fmtNum(main['夏普'], 2),
-      sb: `择时贡献 ${fmtSign(tc['夏普'], 2)}` },
-    { lb: '最大回撤', vl: fmtPct(main['最大回撤'], 1),
-      sb: `择时改善 ${fmtPctSign(tc['最大回撤'])}`, cls: 'bad' },
-    { lb: 'Calmar', vl: fmtNum(main['Calmar'], 2),
-      sb: `择时贡献 ${fmtSign(tc['Calmar'], 2)}` },
-    { lb: '平均仓位', vl: fmtPct(p.summary.avg_position, 0),
-      sb: `对照 ${p.summary.control_name}` },
-    { lb: '年化换手', vl: fmtNum(p.summary.turnover, 2), sb: '单边换手倍数' },
-    { lb: 'RankIC', vl: fmtNum(p.summary.ic, 3),
-      sb: `ICIR ${fmtNum(p.summary.icir, 2)}` },
+    { lb: mh('sharpe', '夏普比率'), vl: fmtNum(main['夏普'], 2),
+      sb: `${mh('timing_contrib', '择时贡献')} ${fmtSign(tc['夏普'], 2)}` },
+    { lb: mh('max_dd', '最大回撤'), vl: fmtPct(main['最大回撤'], 1),
+      sb: `${mh('timing_contrib', '择时改善')} ${fmtPctSign(tc['最大回撤'])}`, cls: 'bad' },
+    { lb: mh('calmar', 'Calmar'), vl: fmtNum(main['Calmar'], 2),
+      sb: `${mh('timing_contrib', '择时贡献')} ${fmtSign(tc['Calmar'], 2)}` },
+    { lb: mh('avg_pos', '平均仓位'), vl: fmtPct(avgPos, 0),
+      sb: `${mh('control', '对照')} ${ctrlName}` },
+    { lb: mh('turnover', '年化换手'), vl: fmtNum(p.summary.turnover, 2),
+      sb: '单边换手倍数' },
+    { lb: mh('rank_ic', 'RankIC'), vl: fmtNum(p.summary.ic, 3),
+      sb: `${mh('icir', 'ICIR')} ${fmtNum(p.summary.icir, 2)}` },
   ];
   $('btKpis').innerHTML = cards.map(x => `
     <div class="kpi ${x.cls || ''}"><div class="lb">${x.lb}</div>
@@ -981,7 +1407,9 @@ function renderBtKpis(p) {
 }
 
 function renderBtMetrics(p) {
-  const cols = ['年化收益', '年化波动', '夏普', '最大回撤', 'Calmar', '月胜率', '累计收益'];
+  const cols = [mh('ann_return', '年化收益'), mh('ann_vol', '年化波动'),
+    mh('sharpe', '夏普'), mh('max_dd', '最大回撤'), mh('calmar', 'Calmar'),
+    mh('monthly_win', '月胜率'), mh('cumulative', '累计收益')];
   const html = `<thead><tr><th class="l">方案</th>${cols.map(c => `<th>${c}</th>`).join('')}
     </tr></thead><tbody>` +
     p.metrics.map(x => {

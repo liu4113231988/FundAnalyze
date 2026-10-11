@@ -3,6 +3,8 @@
  * 捕获所有运行时错误与未捕获 Promise，并断言关键 DOM 是否被正确填充。
  *
  * 用法： node tests/dom_check.js http://127.0.0.1:8760
+ * 依赖： npm install --no-save jsdom   （仓库没有 package.json，按需临时安装即可）
+ *        node_modules/ 已在 .gitignore 中，不会污染仓库。
  */
 const { JSDOM, VirtualConsole } = require('jsdom');
 
@@ -67,7 +69,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   for (const src of ['/static/app.js']) {
     const code = await (await fetch(BASE + src)).text();
     try {
-      window.eval(code);
+      // ★ app.js 首行是 'use strict'，严格模式下**间接 eval 的 const 不会
+      // 泄漏到全局作用域**，所以测试里 `window.eval('METRICS')` 会 ReferenceError。
+      // 真浏览器里 <script> 是全局脚本、不存在这个问题。
+      // 这里追加一行把词典显式导出，供测试做静态一致性检查。
+      window.eval(code + '\n;window.__METRICS = METRICS;');
     } catch (e) {
       errors.push('[eval ' + src + '] ' + (e.stack || e).slice(0, 400));
     }
@@ -238,6 +244,85 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(300);
   const dv = $('tunerBody').querySelector('[data-pk="max_depth"]');
   chk(dv && dv.value === '6', 'max_depth 已恢复默认 6');
+
+  console.log('\n[15] 指标提示（tooltip）');
+  chk($('mtip') !== null, '浮层节点 #mtip 已注入');
+  const mhs = [...doc.querySelectorAll('.mh')];
+  chk(mhs.length >= 25, `带解释的指标标签 ${mhs.length} 个（应≥25）`);
+
+  // ★ 静态一致性：每个 data-m 都必须在 METRICS 里有定义。
+  // 否则页面上会出现"有下划线但悬停无反应"的死标签 ——
+  // 这类问题不会报错，只会静默地少给用户一段解释。
+  const dict = window.__METRICS || {};
+  const keys = Object.keys(dict);
+  chk(keys.length >= 35, `METRICS 词典 ${keys.length} 条`);
+  const dead = [...new Set(mhs.map(e => e.dataset.m))].filter(k => !keys.includes(k));
+  chk(dead.length === 0, dead.length
+    ? `悬空提示（METRICS 缺定义）：${dead.join(', ')}`
+    : '无悬空提示，所有 data-m 均有词典条目');
+
+  // 三段结构完整性
+  const full = Object.values(dict)
+    .filter(v => v && v.what && v.how && v.read).length;
+  chk(full === keys.length, `每条均含 是什么/怎么算/怎么看 三段（${full}/${keys.length}）`);
+  const thin = Object.entries(dict)
+    .filter(([, v]) => typeof v.read === 'string' && v.read.length < 40)
+    .map(([k]) => k);
+  chk(thin.length === 0, thin.length
+    ? `「怎么看」过短（<40 字，可能没写判据）：${thin.join(', ')}`
+    : '「怎么看」均给出了可操作判据，无敷衍条目');
+
+  // 触发行为：mouseover → 显示且有内容；移开 → 隐藏
+  const probe = mhs.find(e => e.dataset.m === 'sharpe') || mhs[0];
+  probe.dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true }));
+  await sleep(60);
+  const tip = $('mtip');
+  chk(tip.classList.contains('on'), `悬停 ${probe.dataset.m} → 浮层显示`);
+  chk(/是什么/.test(tip.textContent) && /怎么看/.test(tip.textContent),
+    '浮层含「是什么 / 怎么看」两段');
+  console.log('    ' + tip.textContent.replace(/\s+/g, ' ').slice(0, 150));
+
+  const other = mhs.find(e => e.dataset.m !== probe.dataset.m) || mhs[1];
+  other.dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true }));
+  await sleep(60);
+  chk(tip.textContent !== '' && tip.classList.contains('on'),
+    `移到另一个标签后内容已切换（${other.dataset.m}）`);
+
+  doc.body.dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true }));
+  await sleep(60);
+  chk(!tip.classList.contains('on'), '移开 → 浮层隐藏');
+
+  // 回测区（跑完才有数据）的指标标签也应带提示
+  $('btRun').dispatchEvent(new window.Event('click', { bubbles: true }));
+  let btDone = false;
+  for (let i = 0; i < 60; i++) {
+    await sleep(1000);
+    if (!$('btOut').hidden) { btDone = true; break; }
+  }
+  chk(btDone, '回测运行完成');
+  if (btDone) {
+    const btMh = [...$('btOut').querySelectorAll('.mh')].map(e => e.dataset.m);
+    chk(btMh.length >= 8, `回测区指标标签 ${btMh.length} 个`);
+    chk($('btKpis').querySelectorAll('.mh').length >= 7,
+      `回测 KPI 卡提示 ${$('btKpis').querySelectorAll('.mh').length} 个`);
+    const btDead = [...new Set(btMh)].filter(k => !keys.includes(k));
+    chk(btDead.length === 0, btDead.length
+      ? `回测区悬空提示：${btDead.join(', ')}` : '回测区无悬空提示');
+    // 健康分卡上的"择时贡献/对照"必须来自该行自身（不是主策略的）
+    const kt = $('btKpis').textContent;
+    chk(/对照/.test(kt) && /择时贡献/.test(kt), '回测 KPI 含对照与择时贡献');
+    chk(!/NaN|undefined/.test(kt), '回测 KPI 无 NaN/undefined');
+  }
+
+  // 覆盖度：词典不应有从未被引用的死条目。
+  // ★ 必须放在回测之后 —— 回测表的表头在跑完之前根本不存在，
+  //   放在前面会把 monthly_win / cumulative 误判成"死条目"。
+  const allMh = [...doc.querySelectorAll('.mh')];
+  chk(allMh.length >= 35, `全页指标标签 ${allMh.length} 个（含回测区）`);
+  const unused = keys.filter(k => !allMh.some(e => e.dataset.m === k));
+  chk(unused.length === 0, unused.length
+    ? `词典中未被任何标签引用的死条目：${unused.join(', ')}`
+    : '词典条目全部被页面引用，无死条目');
 
   console.log('\n' + '='.repeat(60));
   console.log(`失败项：${fails}`);
