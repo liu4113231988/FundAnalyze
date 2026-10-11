@@ -64,10 +64,27 @@ def t1():
     ctrl_main = bt["controls"]["择时策略(融合)"]
     ctrl_full = bt["controls"]["满仓方案"]
     avg_main = bt["avg_position_all"]["择时策略(融合)"]
-    chk(ctrl_main == f"恒定仓位({avg_main:.0%})",
+    chk(ctrl_main == f"恒定仓位({avg_main:.1%})",
         f"主策略对照 = {ctrl_main}，与其自身平均仓位 {avg_main:.1%} 一致")
-    chk(ctrl_full == "恒定仓位(100%)", f"满仓方案对照 = {ctrl_full}（平均仓位 100%）")
+    chk(ctrl_full == "恒定仓位(100.0%)", f"满仓方案对照 = {ctrl_full}（平均仓位 100%）")
     chk(ctrl_main != ctrl_full, "两个方案不再共用同一份对照")
+
+    # ★ P0-02 键碰撞回归：精确仓位不同但四舍五入到 0.1% 相同（或相近）的两个
+    #   方案，必须各自配一份**自己的**对照。旧实现用 .0% 作键，
+    #   50.1% 与 50.4% 会共用"恒定仓位(50%)"，后者凭空多出虚假超额。
+    close = {"近A": pd.Series(0.501, index=idx), "近B": pd.Series(0.504, index=idx)}
+    btc = run_backtest(nav, sig, variants=close)
+    cA, cB = btc["controls"]["近A"], btc["controls"]["近B"]
+    chk(cA != cB, f"相近仓位不再碰撞：{cA} vs {cB}")
+    for v in ("近A", "近B"):
+        tcv = btc["timing_contrib_all"][v]
+        chk(abs(tcv["年化收益"]) < 1e-12 and abs(tcv["夏普"]) < 1e-12,
+            f"{v} 对自己的精确对照净贡献 = {tcv['年化收益']:+.2e}（应为 0）")
+    # 顺序无关：交换 variants 顺序结果不变
+    btc2 = run_backtest(nav, sig, variants={"近B": close["近B"], "近A": close["近A"]})
+    chk(abs(btc2["timing_contrib_all"]["近B"]["年化收益"]
+            - btc["timing_contrib_all"]["近B"]["年化收益"]) < 1e-15,
+        "交换策略顺序不改变净贡献")
 
     # 核心断言：满仓方案 ≡ 买入持有 ≡ 恒定仓位(100%)，净贡献必须≈0。
     # 修复前它是「满仓方案 − 恒定仓位(50%)」，会被记上一笔纯粹来自仓位差的假超额。
@@ -256,12 +273,19 @@ def t4():
     chk(len(g) > 0, f"lowfreq_grid 返回 {len(g)} 行")
     if not g.empty:
         # 每个格子的对照组仓位必须与该格子「平均仓位」一致
-        bad = 0
+        import re
+        bad = []
         for row in g.itertuples():
-            want = f"恒定仓位({row.平均仓位:.0%})"
-            if str(row.对照组) != want:
-                bad += 1
-        chk(bad == 0, f"全部 {len(g)} 个格子的对照组与自身平均仓位一致（不一致 {bad} 个）")
+            got = str(row.对照组)
+            # 直接比对字符串会撞上 0.05% 的格式化边界（如 0.556499 → "55.6%"
+            # 而 round(...,4) → "55.7%"），所以解析出百分比按数值比较，
+            # 容差取 .1% 精度的一半。展示名撞车时会追加 "#N" 消歧（P0-02）。
+            m = re.search(r"\(([\d.]+)%\)", got)
+            fm = float(m.group(1)) / 100.0 if m else float("nan")
+            if not np.isfinite(fm) or abs(fm - float(row.平均仓位)) > 5e-4:
+                bad.append(f"{row.平均仓位:.4f} vs {got}")
+        chk(not bad, f"全部 {len(g)} 个格子的对照组与自身平均仓位一致"
+                     + (f"（不一致：{bad}）" if bad else ""))
 
 
 # ============================================================== T5 模型层

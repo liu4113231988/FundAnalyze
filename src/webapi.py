@@ -41,6 +41,95 @@ from .signal import SignalEngine, build_decision, health_stats
 CACHE_DIR = C.DATA_DIR / "webcache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+
+# ====================================================================== 参数校验（P1-06）
+# 放在这里（而不是 webapp/app.py）是为了让离线回归测试能直接导入：
+# 导入 app.py 会触发 Flask 初始化与旧缓存清扫，不适合在测试里做。
+MAX_REBAL_HARD = 2000        # 再大只是把请求拖到超时，没有额外精度收益
+_INF = float("inf")
+
+
+def _finite(x) -> bool:
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return False
+    return f == f and f not in (_INF, -_INF)
+
+
+def _parse_max_rebal(raw, default=None):
+    """
+    重估点上限。三态必须分清（P1-06）：
+
+      · 键缺失 / None / ""  → default（"用配置默认值"，当前为 60）
+      · **0**（或 "0"）     → **不抽稀**，对应 UI 的「全部 · 最精确」
+      · 正整数              → 该值（≤ MAX_REBAL_HARD）
+
+    旧实现是 `None if mr in (None, "", 0) else int(mr)`：0 被折叠成 None，
+    于是 UI 上选「全部 · 最精确」实际只跑 60 个重估点，与界面承诺不符；
+    而传 "abc" 会让 int() 抛异常，直接变成 HTTP 500。
+    """
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return default
+    if isinstance(raw, bool):
+        raise ValueError("max_rebal 必须是非负整数")
+    if isinstance(raw, int):
+        v = int(raw)
+    elif isinstance(raw, float):
+        if not float(raw).is_integer():
+            raise ValueError(f"max_rebal 必须是整数，收到 {raw!r}")
+        v = int(raw)
+    elif isinstance(raw, str):
+        s = raw.strip()
+        if not s.lstrip("+-").isdigit():
+            raise ValueError(f"max_rebal 必须是非负整数，收到 {raw!r}")
+        v = int(s)
+    else:
+        raise ValueError(f"max_rebal 类型不支持：{type(raw).__name__}")
+    if v < 0:
+        raise ValueError("max_rebal 不能为负")
+    if v > MAX_REBAL_HARD:
+        raise ValueError(f"max_rebal 过大（硬上限 {MAX_REBAL_HARD}）")
+    return v
+
+
+def _parse_auto_equity(body: dict) -> bool:
+    """
+    auto_equity 缺省时**跟随核心配置**（C.RBSA['auto_equity'] 现为 True），
+    而不是硬编码 False —— 旧实现让 API、核心配置与 UI 默认值三者不一致。
+    """
+    if "auto_equity" not in body or body.get("auto_equity") is None:
+        return bool(C.RBSA.get("auto_equity", False))
+    v = body.get("auto_equity")
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off"):
+            return False
+    raise ValueError(f"auto_equity 必须是布尔值，收到 {v!r}")
+
+
+def _check_params(params):
+    """params 必须是 {模型: {超参: 有限数值}}，且模型名已知。"""
+    if not params:
+        return {}
+    if not isinstance(params, dict):
+        raise ValueError("params 必须是对象")
+    for m, p in params.items():
+        if m not in MODEL_ORDER:
+            raise ValueError(f"未知模型：{m}")
+        if not isinstance(p, dict):
+            raise ValueError(f"params[{m}] 必须是对象")
+        for k, v in p.items():
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise ValueError(f"params[{m}][{k}] 必须是数值")
+            if not _finite(v):
+                raise ValueError(f"params[{m}][{k}] 必须是有限数值")
+    return params
+
 # 已完成/失败任务在内存中的保留时间；过期后整任务清除（分析结果磁盘缓存仍在）
 JOB_TTL_SEC = 30 * 60
 
@@ -685,6 +774,12 @@ def analyze(code: str, models: Optional[List[str]] = None,
     return result
 
 
+# 负缓存（"名录里确实没有这只基金"）的存活时间，秒。24h 足够避免重复打接口，
+# 又不会把一次断网/一次输错永久固化。
+_NAME_NEG_TTL = 24 * 3600
+_NAME_NEG_PREFIX = "__neg__"
+
+
 def _guess_name(code: str) -> Optional[str]:
     """
     尝试解析基金中文名；**查不到时返回 None**，不再用代码冒充名字。
@@ -693,12 +788,23 @@ def _guess_name(code: str) -> Optional[str]:
     "名录里查不到"，于是前端对"代码输错了"完全静默，只能等任务跑完才发现。
     """
     hit = _cache_load(code, "name")
-    if hit is not None:
-        return hit if hit != "" else None
-    nm = None
+    # ★ P1-05：负缓存必须有 TTL。旧实现把"网络失败"和"名录里确实没有"都写成
+    #   空串并永久记住 —— 一次断网或一次代码输错，之后永远查不到名字。
+    if isinstance(hit, str) and hit.startswith(_NAME_NEG_PREFIX):
+        try:
+            if time.time() - float(hit[len(_NAME_NEG_PREFIX):]) < _NAME_NEG_TTL:
+                return None                     # 负缓存未过期
+        except (TypeError, ValueError):
+            pass
+    elif hit is not None and hit != "":
+        return hit
+    # 走到这里：未命中、负缓存过期、或是旧格式的空串 —— 都重新查一次
+
+    nm, listed = None, False        # listed = 名录**成功拉取**（区分网络失败）
     try:
         import akshare as ak
         info = ak.fund_name_em()
+        listed = True
         col = "基金代码" if "基金代码" in info.columns else info.columns[0]
         namecol = next((c for c in ("基金简称", "名称", "基金名称")
                         if c in info.columns), None)
@@ -708,8 +814,15 @@ def _guess_name(code: str) -> Optional[str]:
         elif len(m) and info.shape[1] > 1:
             nm = str(m.iloc[0, 1])
     except Exception:                      # noqa: BLE001
-        nm = None
-    _cache_save(code, "name", nm or "")
+        nm, listed = None, False
+
+    if nm:
+        _cache_save(code, "name", nm)
+    elif listed:
+        # 名录拉到了、只是没有这只基金 → 记负缓存，但**带 TTL**
+        _cache_save(code, "name",
+                    f"{_NAME_NEG_PREFIX}{time.time():.0f}")
+    # 网络失败：什么都不写，下次请求重新尝试
     return nm
 
 

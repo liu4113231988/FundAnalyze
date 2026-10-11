@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pickle
 import sys
 import threading
@@ -39,7 +40,9 @@ from src import config as C                                # noqa: E402
 from src import data as D                                  # noqa: E402
 from src.models import MODEL_ORDER, model_catalog         # noqa: E402
 from src.webapi import (CACHE_DIR, JOBS, analyze, backtest_fund,  # noqa: E402
-                         refit_single)
+                         refit_single, _parse_max_rebal,
+                         _parse_auto_equity, _check_params,
+                         _finite)
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -107,16 +110,40 @@ def catalog():
 
 # ====================================================================== 分析任务
 def _result_cache_path(code: str, models, params, max_rebal=None,
-                       auto_equity=False):
+                       auto_equity=False, data_stamp: str = ""):
     import hashlib
+    # ★ P1-05：缓存键必须绑定**底层数据摘要**，否则行情追加后旧结果不会失效，
+    #   表现为"刷新无效"。data_stamp 由 src.data.data_stamp() 给出。
     key = json.dumps({"v": C.CACHE_VERSION, "c": code,
                       "m": sorted(models or []),
                       "p": params or {}, "r": max_rebal or 0,
-                      "a": bool(auto_equity)},
+                      "a": bool(auto_equity), "d": data_stamp},
                      sort_keys=True, ensure_ascii=False)
     h = hashlib.md5(key.encode()).hexdigest()[:10]
     # 版本号写进文件名，便于启动时清扫旧版本缓存
     return CACHE_DIR / f"result_v{C.CACHE_VERSION}_{code}_{h}.pkl"
+
+
+# ------------------------------------------------------------------ 参数校验（P1-06）
+# 硬上限：再大只是把请求拖到超时，没有任何额外精度收益
+MAX_REBAL_HARD = 2000
+_INF = float("inf")
+
+# 并发闸门（P1-07）：分析任务内部还会开进程池，不设上限会把 CPU/内存打满。
+# 单实例即可，不需要引入分布式系统；超限时返回 429 而不是排队到超时。
+MAX_CONCURRENT_JOBS = int(os.environ.get("FIL_MAX_JOBS", "2"))
+_JOB_SEM = threading.BoundedSemaphore(max(1, MAX_CONCURRENT_JOBS))
+
+
+def _bad(field: str, msg: str, status: int = 400):
+    """结构化 4xx。非法输入必须停在 4xx —— 旧实现里 int("abc") 直接抛成 500。"""
+    return jsonify({"ok": False, "error": msg, "field": field}), status
+
+
+# ------------------------------------------------------------------ 参数解析
+# _finite / _parse_max_rebal / _parse_auto_equity / _check_params 定义在
+# src/webapi.py —— 放在那里是为了让离线回归测试能直接导入它们
+# （导入本模块会触发 Flask 初始化与旧缓存清扫，不适合在测试里做）。
 
 
 def _atomic_pickle_dump(obj, path: Path, retries: int = 6):
@@ -180,19 +207,34 @@ def api_analyze():
     models = body.get("models") or MODEL_ORDER
     params = body.get("params") or {}
     refresh = bool(body.get("refresh", False))
-    # 重估点上限：越大越准越慢。前端可传 0 表示"不抽稀"（最精确但最慢）。
-    mr = body.get("max_rebal", None)
-    max_rebal = None if mr in (None, "", 0) else int(mr)
-    auto_equity = bool(body.get("auto_equity", False))
+    # 重估点上限：0 = 不抽稀（「全部 · 最精确」），省略 = 用配置默认 60。
+    try:
+        max_rebal = _parse_max_rebal(body.get("max_rebal", None), default=None)
+        auto_equity = _parse_auto_equity(body)
+        params = _check_params(params)
+    except ValueError as e:
+        return _bad("params", str(e))
 
     if not (len(code) == 6 and code.isdigit()):
-        return jsonify({"error": "请输入 6 位基金代码，例如 110022"}), 400
+        return _bad("code", "请输入 6 位基金代码，例如 110022")
+    if not isinstance(models, (list, tuple)):
+        return _bad("models", "models 必须是模型名列表")
     bad = [m for m in models if m not in MODEL_ORDER]
     if bad:
-        return jsonify({"error": f"未知模型：{','.join(bad)}"}), 400
+        return _bad("models", f"未知模型：{','.join(map(str, bad))}")
+
+    # ---- 并发闸门（P1-07）：每个任务内部还会开进程池，不设上限会把 CPU 打满
+    if not _JOB_SEM.acquire(blocking=False):
+        return _bad("concurrency",
+                    f"同时运行的分析任务已达上限 {MAX_CONCURRENT_JOBS}，请稍后重试",
+                    429)
 
     # ---- 缓存命中：直接返回
-    cp = _result_cache_path(code, models, params, max_rebal, auto_equity)
+    try:
+        stamp = D.data_stamp()
+    except Exception:                             # noqa: BLE001
+        stamp = "unknown"
+    cp = _result_cache_path(code, models, params, max_rebal, auto_equity, stamp)
     if cp.exists() and not refresh:
         try:
             with cp.open("rb") as f:
@@ -218,6 +260,8 @@ def api_analyze():
         except Exception as e:                        # noqa: BLE001
             traceback.print_exc()
             JOBS.fail(jid, f"{type(e).__name__}: {str(e)[:300]}")
+        finally:
+            _JOB_SEM.release()
 
     threading.Thread(target=worker, name=f"job-{jid}",
                      daemon=True).start()
@@ -252,13 +296,16 @@ def api_refit():
     code = str(body.get("code", "")).strip()
     model = str(body.get("model", "")).strip()
     params = body.get("params") or {}
-    mr = body.get("max_rebal", None)
-    max_rebal = None if mr in (None, "", 0) else int(mr)
-    auto_equity = bool(body.get("auto_equity", False))
+    try:
+        max_rebal = _parse_max_rebal(body.get("max_rebal", None), default=None)
+        auto_equity = _parse_auto_equity(body)
+        params = _check_params(params)
+    except ValueError as e:
+        return _bad("params", str(e))
     if model not in MODEL_ORDER:
-        return jsonify({"error": f"未知模型：{model}"}), 400
+        return _bad("model", f"未知模型：{model}")
     if not (len(code) == 6 and code.isdigit()):
-        return jsonify({"error": "请输入 6 位基金代码"}), 400
+        return _bad("code", "请输入 6 位基金代码")
 
     jid = JOBS.create(code, [model])
 
@@ -301,7 +348,14 @@ def api_backtest():
             except (ValueError, TypeError):
                 return jsonify({"error": f"{lbl}日期格式应为 YYYY-MM-DD"}), 400
     if start_date and end_date and start_date >= end_date:
-        return jsonify({"error": "起始日需早于结束日"}), 400
+        return _bad("start", "起始日需早于结束日")
+    # 单边成本：负数或大到离谱的值必须挡在 4xx，不能让它在回测里静默生效
+    if cost_rate is not None:
+        if isinstance(cost_rate, bool) or not isinstance(cost_rate, (int, float)):
+            return _bad("cost_rate", "cost_rate 必须是数值")
+        if not _finite(cost_rate) or float(cost_rate) < 0 or float(cost_rate) > 0.05:
+            return _bad("cost_rate", "cost_rate 应在 [0, 0.05] 区间内")
+        cost_rate = float(cost_rate)
 
     jid = JOBS.create(code, [model_key])
 

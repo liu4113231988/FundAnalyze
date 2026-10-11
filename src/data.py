@@ -8,12 +8,23 @@
     - 申万行业 : 申万宏源一级行业指数（akshare: index_hist_sw）
 
 注意
-    累计净值已含分红再投效果，用于收益分析是标准的；停牌/缺失按交易日历前向填充，
-    但不允许跨超过 5 个交易日填充（防止长期停牌被伪装成 0 收益）。
+    停牌/缺失按交易日历前向填充，但不允许跨超过 5 个交易日填充
+    （防止长期停牌被伪装成 0 收益）。
+
+★ 收益口径（P0-01，尚未核实）
+    `fetch_fund_nav` 取的是数据源的「累计净值走势」。原模块注释称它
+    "已含分红再投效果"——**这个等式没有经过真实样本核实**。累计净值通常是
+    「单位净值 + 历史累计分红」，而累计分红是**存量**、不参与后续增长，
+    所以直接取对数差分会把收益率系统性、且随时间加重地压低。
+    在本仓库用真实分红样本核实之前，基于该口径的所有结论都必须标注
+    "口径待修正"。正确口径见 `total_return_index()`（需单位净值 + 分红/拆分事件）。
+    指数侧用的是**价格指数**（不含股息），与基金总回报之间还差一个股息率。
 """
 from __future__ import annotations
 
 import json
+import os
+import socket
 import time
 import warnings
 from pathlib import Path
@@ -23,6 +34,15 @@ import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
+
+# ★ P1-07：AkShare 的请求没有暴露 timeout 参数，一次网络挂起会把整个分析任务
+#   （以及承载它的 Web 线程）永久卡住。这里给 socket 设一个默认超时作为兜底。
+#   想要更长/更短可用环境变量 FIL_HTTP_TIMEOUT 覆盖；设为 0 表示不限制。
+try:
+    _tmo = float(os.environ.get("FIL_HTTP_TIMEOUT", "30"))
+    socket.setdefaulttimeout(_tmo if _tmo > 0 else None)
+except (TypeError, ValueError):                     # noqa: BLE001
+    pass
 
 from . import config as C
 
@@ -50,7 +70,14 @@ def _clean_series(s: pd.Series, start: Optional[str] = None) -> pd.Series:
 
 # ------------------------------------------------------------------ 基金净值
 def fetch_fund_nav(code: str, start: Optional[str] = None) -> pd.Series:
-    """返回基金累计净值序列（index=交易日）。"""
+    """
+    返回基金**累计净值**序列（index=交易日）。
+
+    ★ 口径警告（P0-01）：本序列是数据源的「累计净值走势」，**不是**经过核验的
+    红利再投资复权净值。它与真实总回报的偏离程度取决于该基金的历史分红总额，
+    且偏离随时间加重。需要正确口径时，请取得单位净值与分红/拆分事件后调用
+    `total_return_index()`，或用独立来源交叉验证后再替换本函数。
+    """
     import akshare as ak
 
     df = _retry(ak.fund_open_fund_info_em, symbol=code, indicator="累计净值走势")
@@ -61,6 +88,76 @@ def fetch_fund_nav(code: str, start: Optional[str] = None) -> pd.Series:
     # 累计净值存在大量数值相同的相邻记录，按数值去重会误删四成以上样本。
     s.name = f"fund_{code}"
     return _clean_series(s, start)
+
+
+# ------------------------------------------------------------------ 净值口径
+# ★ P0-01：口径必须显式可选、可核对，不能靠"模块说明里的一句话"默认成立。
+NAV_BASIS_CUM = "cum"        # 数据源「累计净值走势」直接取对数差分（当前默认）
+NAV_BASIS_TOTAL = "total"    # 由单位净值 + 分红/拆分事件构造的总回报（红利再投资）
+
+NAV_BASIS_NOTE = {
+    NAV_BASIS_CUM: (
+        "累计净值直算。**尚未与真实分红/拆分样本核实**：累计净值通常是"
+        "「单位净值 + 历史累计分红」，它不等于红利再投资净值。由于累计分红是"
+        "存量、不参与后续增长，收益率会被系统性且**随时间加重**地压低"
+        "（见 TODO P0-01）。在核实前，基于本口径的结论不得作为决策依据。"),
+    NAV_BASIS_TOTAL: (
+        "总回报（红利再投资）：由单位净值 + 分红/拆分事件逐日构造，"
+        "是基金收益的正确口径。指数侧若用价格指数，则与之差一个股息率。"),
+}
+
+
+def total_return_index(unit_nav: pd.Series,
+                       dividends: Optional[pd.DataFrame] = None,
+                       splits: Optional[pd.DataFrame] = None) -> pd.Series:
+    """
+    由**单位净值 + 分红/拆分事件**构造总回报指数（起点 1.0，红利再投资口径）。
+
+        r_t = (NAV_t × 份额因子 + D_t − NAV_{t−1}) / NAV_{t−1}
+
+    即除息日把现金分红加回收益：除权后净值下跌的那部分不是亏损。
+    拆分（1 拆 k）把**拆分日之前**的净值与分红统一折算到当前份额口径，
+    这样净值序列在事件日连续，事件本身不产生虚假收益。
+
+    unit_nav   : 单位净值序列（index=交易日）
+    dividends  : DataFrame(index=除息日, 列 per_unit=每份现金分红)，可 None
+    splits     : DataFrame(index=拆分日, 列 ratio=拆分比例，2 表示 1 拆 2)，可 None
+
+    返回与 unit_nav 同索引的总回报指数序列（首日 = 1.0）。
+    """
+    s = pd.Series(unit_nav).astype(float).dropna().sort_index()
+    s = s[~s.index.duplicated(keep="last")]
+    if s.empty:
+        return s.iloc[0:0]
+
+    fac = pd.Series(1.0, index=s.index, dtype=float)
+    if splits is not None and len(splits):
+        sp = splits.copy()
+        sp.index = pd.to_datetime(sp.index)
+        col = "ratio" if "ratio" in sp.columns else sp.columns[0]
+        for d, ratio in zip(sp.index, sp[col]):
+            try:
+                rr = float(ratio)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(rr) and rr > 0:
+                fac[s.index < d] /= rr
+
+    adj = s * fac
+    d = pd.Series(0.0, index=adj.index, dtype=float)
+    if dividends is not None and len(dividends):
+        dv = dividends.copy()
+        dv.index = pd.to_datetime(dv.index)
+        col = "per_unit" if "per_unit" in dv.columns else dv.columns[0]
+        amt = dv[col].astype(float)
+        amt = amt[amt.index.isin(d.index)]
+        d.loc[amt.index] += amt.values * fac.reindex(amt.index).values
+
+    prev = adj.shift(1)
+    r = (adj + d - prev) / prev
+    r = r.where(prev > 0)
+    r.iloc[0] = 0.0
+    return (1.0 + r.fillna(0.0)).cumprod()
 
 
 # ------------------------------------------------------------------ 指数行情
@@ -136,6 +233,25 @@ def fetch_universe(codes: Iterable[str], start: str, end: Optional[str] = None,
         print(f"  [data] 候选池抓取完成：成功 {ok} / 失败 {fail}")
     px = pd.DataFrame(series).sort_index()
     return px
+
+
+def data_stamp() -> str:
+    """
+    底层数据的粗粒度指纹（P1-05）。
+
+    结果缓存旧键里只有 (基金, 模型集, 参数, 精度)，**不含底层数据摘要**：
+    行情追加或重抓之后，缓存键不变，页面会一直显示旧结果，看起来像"刷新无效"。
+    这里用数据目录里 CSV 的「文件数 + 最大 mtime」做指纹 —— 任何一次写入都会
+    改变它，于是缓存键随之改变，结果自然刷新。开销仅一次目录 stat。
+    """
+    try:
+        fs = list(C.DATA_DIR.glob("*.csv"))
+        if not fs:
+            return "empty"
+        mx = max(f.stat().st_mtime for f in fs)
+        return f"{len(fs)}:{int(mx)}"
+    except Exception:                                   # noqa: BLE001
+        return "unknown"
 
 
 # ------------------------------------------------------------------ 清洗对齐

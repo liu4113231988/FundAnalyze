@@ -82,6 +82,11 @@ def common_factor_analysis(excess: pd.DataFrame,
     直接对 X=[1, m] 做两参数 NW 回归在数值上极不稳定（常数列与 0.01 量级
     收益列尺度悬殊，标准误会爆炸到 t≈1e-16），而我们要检验的本来
     就只是"超额均值是否为 0"。
+
+    ★ P1-03 口径澄清：这里的 t_nw 检验的是**原始超额均值是否为 0**，
+    它**不是**"扣掉市场因子后的 alpha 是否显著"。两者不是一回事 ——
+    不能拿本函数的显著性去宣称"存在因子调整后的 alpha"。
+    默认 lags=5 是固定值，未做带宽敏感性；需要时用 `hac_sensitivity()`。
     """
     m = np.log(market).diff().reindex(excess.index)
     rows = []
@@ -190,6 +195,87 @@ def block_bootstrap(excess: pd.DataFrame, sharpe_rf: float = 0.0,
     }
 
 
+# ====================================================================== 3b. 敏感性 / 多重比较
+def bootstrap_sensitivity(excess: pd.DataFrame, sharpe_rf: float = 0.0,
+                          blocks=(20, 60, 120, 250), n_boot: int = 1000,
+                          seed: int = 20261011) -> pd.DataFrame:
+    """
+    块长敏感性（P1-03）。
+
+    默认块长 60 是拍出来的。若结论只在某一个块长下成立，那它依赖的是
+    调参而不是数据 —— 必须把 p 值随块长的变化一起报出来。
+    """
+    rows = []
+    for b in blocks:
+        r = block_bootstrap(excess, sharpe_rf=sharpe_rf, block=int(b),
+                            n_boot=int(n_boot), seed=seed)
+        rows.append({"块长": int(b),
+                     "为正比例": r["share_pos"],
+                     "p值": r["p_value"],
+                     "零假设5%分位": r["boot_p05"],
+                     "零假设95%分位": r["boot_p95"]})
+    return pd.DataFrame(rows)
+
+
+def hac_sensitivity(excess: pd.DataFrame, lags=(0, 5, 10, 21)) -> pd.DataFrame:
+    """NW 带宽敏感性（P1-03）：逐基金超额均值 t 值随滞后的变化。"""
+    rows = []
+    for c in excess.columns:
+        y = excess[c].dropna().values
+        if len(y) < 120:
+            continue
+        row = {"基金": c}
+        for L in lags:
+            row[f"t(lag={int(L)})"] = float(_nw_mean_t(y, lags=int(L)))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def multiplicity_adjust(pvals, names=None, alpha: float = 0.05,
+                        method: str = "fdr"):
+    """
+    多重比较校正（P1-03）。
+
+    从 108 组参数网格或十几个模型里挑出最大值，再拿单次检验的 α=0.05
+    去判定"显著"，等于把假阳性率放大了几十倍 —— E5 里"37% 的格子天然为正"
+    就是这个效应的直接证据。
+
+    method:
+      "bonferroni"  阈值 α/m，最保守，适合候选数少、结论要硬的场合
+      "fdr"         Benjamini-Hochberg，控制错误发现率，候选多时更实用
+
+    返回 (DataFrame, 说明文字)。
+    """
+    p = np.asarray([float(x) for x in pvals], dtype=float)
+    m = int(np.isfinite(p).sum())
+    names = list(names) if names is not None else [f"#{i}" for i in range(len(p))]
+    if m == 0:
+        return pd.DataFrame({"检验": names, "p值": p, "拒绝原假设": False}), "无有效 p 值"
+
+    ok = np.isfinite(p)
+    pv = p[ok]
+    rej = np.zeros(m, dtype=bool)
+    if method == "bonferroni":
+        thr = alpha / m
+        rej = pv <= thr
+        note = f"Bonferroni（m={m}）：阈值 {alpha}/{m} = {thr:.5f}，拒绝 {int(rej.sum())} 个"
+    else:
+        order = np.argsort(pv)
+        ranked = pv[order]
+        line = alpha * (np.arange(1, m + 1) / float(m))
+        passed = np.where(ranked <= line)[0]
+        cut = int(passed[-1]) + 1 if len(passed) else 0
+        rej[order[:cut]] = True
+        note = (f"BH-FDR（m={m}, α={alpha}）：{cut}/{m} 个通过"
+                f"（最大通过 p = {ranked[cut-1]:.4f}）" if cut else
+                f"BH-FDR（m={m}, α={alpha}）：无一项通过")
+
+    reject_full = np.zeros(len(p), dtype=bool)
+    reject_full[ok] = rej
+    return pd.DataFrame({"检验": names, "p值": p,
+                         "拒绝原假设": reject_full}), note
+
+
 # ====================================================================== 编排
 def assess_positions(nav_by_fund: Dict[str, pd.Series],
                      pos_by_fund: Dict[str, pd.Series],
@@ -289,10 +375,18 @@ def assess_signal_edge(nav_by_fund: Dict[str, pd.Series],
         d = (bt["series"][key] - bt["series"][ctrl])
         d = d[d.index >= bt["window_start"]]
         excess[code] = d
-        diag[code] = {"sharpe": float(bt["metrics"].loc[key, "夏普"]
-                                       - bt["metrics"].loc[ctrl, "夏普"]),
-                      "ann": float(bt["metrics"].loc[key, "年化收益"]
-                                   - bt["metrics"].loc[ctrl, "年化收益"]),
+        # ★ P1-10：旧实现把两个**几何**夏普相减当作"超额夏普"，而夏普不可加
+        #   （实测同一份数据上"为正基金数"会从 14/14 变成 9/14，足以翻转结论）。
+        #   正确口径是 run_backtest 在超额日序列上算的 IR。
+        #   旧值保留在 sharpe_diff_geometric 里，仅供对照，不得用于判定。
+        _tc = bt["timing_contrib_all"].get(key, {}) or {}
+        diag[code] = {
+            "sharpe": float(_tc.get("夏普", float("nan"))),
+            "ann": float(_tc.get("年化收益", float("nan"))),
+            "sharpe_diff_geometric": float(bt["metrics"].loc[key, "夏普"]
+                                           - bt["metrics"].loc[ctrl, "夏普"]),
+            "ann_diff_geometric": float(bt["metrics"].loc[key, "年化收益"]
+                                        - bt["metrics"].loc[ctrl, "年化收益"]),
                       "avg_pos": float(bt["avg_position_all"].get(key, np.nan)),
                       "control": ctrl}
 

@@ -148,8 +148,14 @@ MODEL_ORDER = list(MODELS.keys())
 
 # ====================================================================== 约束回归工具
 def _constrained_fit(X: np.ndarray, y: np.ndarray, total: float,
-                     sw: Optional[np.ndarray] = None) -> np.ndarray:
-    """min Σ sw_i(Xw-y)²  s.t. w>=0, Σw=total（SLSQP 精确解）。"""
+                     sw: Optional[np.ndarray] = None,
+                     status: Optional[dict] = None) -> np.ndarray:
+    """
+    min Σ sw_i(Xw-y)²  s.t. w>=0, Σw=total（SLSQP 精确解）。
+
+    status 为可选的可变字典：传入后会把 `ok`（是否收敛）与 `reason`（失败原因）
+    写进去，供调用方把"降级"如实上报（P0-05）。不传则行为与旧版完全一致。
+    """
     from scipy.optimize import minimize
 
     k = X.shape[1]
@@ -171,12 +177,21 @@ def _constrained_fit(X: np.ndarray, y: np.ndarray, total: float,
     # 或窗口内样本过少）会返回未收敛解甚至 NaN，权重里的 NaN 会一路污染
     # 合成基准、健康分与回测净值，且不会报错——只会得到一条莫名其妙的曲线。
     x = np.asarray(res.x, dtype=float)
+    if status is not None:
+        status["ok"] = bool(res.success) and bool(np.all(np.isfinite(x)))
+        status["reason"] = ("" if status["ok"]
+                            else (f"SLSQP 未收敛({getattr(res, 'message', '')})"
+                                  if not res.success else "解含非有限值"))
     if not res.success or not np.all(np.isfinite(x)):
+        if status is not None:
+            status["degraded"] = "equal_weight"
         return np.full(k, total / k)
     w = np.clip(x, 0.0, None)
     if w.sum() > 0:
         w = w * total / w.sum()
     else:
+        if status is not None:
+            status["degraded"] = "equal_weight"
         w = np.full(k, total / k)
     return w
 
@@ -211,7 +226,8 @@ def _alpha_ladder(base: float, scale: float) -> List[float]:
     return sorted({round(a, 8) for a in ladder if a > 0})
 
 
-def _ts_cv_mse(make_model, Xs: np.ndarray, ys: np.ndarray, n_splits: int = 2):
+def _ts_cv_mse(make_model, Xs: np.ndarray, ys: np.ndarray, n_splits: int = 2,
+               transform=None):
     """
     时序交叉验证选超参，返回 **(在全样本上重新拟合好的模型实例, MSE)**。
 
@@ -221,6 +237,14 @@ def _ts_cv_mse(make_model, Xs: np.ndarray, ys: np.ndarray, n_splits: int = 2):
     n_splits 默认 2 而非 4：滚动评估会在 ~120 个窗口上反复调用本函数，
     折数直接决定总耗时（4 折 × 3 档 = 12 次拟合/窗口）。
     2 折在正则强度这种量级选择上已经足够，且耗时减半。
+
+    transform(X_tr, y_tr, X_te, y_te) → (X_tr', y_tr', X_te', y_te')
+    ---------------------------------------------------------------
+    ★ P1-02：标准化/PCA/特征选择这类**预处理必须只在同一折的训练段上拟合**，
+    再用它变换该折的验证段。旧实现先用**整个滚动窗口**算出 mu/sd 再切折，
+    于是内层验证段的均值和方差被提前写进了预处理 —— 它不等于使用了外层的
+    未来收益，但会让内层选参偏乐观，且这个偏差无从察觉。
+    传 None 则保持旧行为（调用方若不需要预处理）。
     """
     from sklearn.model_selection import TimeSeriesSplit
 
@@ -235,8 +259,12 @@ def _ts_cv_mse(make_model, Xs: np.ndarray, ys: np.ndarray, n_splits: int = 2):
         for tr, te in cv.split(Xs):
             m = factory()
             try:
-                m.fit(Xs[tr], ys[tr])
-                errs.append(float(np.mean((m.predict(Xs[te]) - ys[te]) ** 2)))
+                if transform is not None:
+                    Xtr, ytr, Xte, yte = transform(Xs[tr], ys[tr], Xs[te], ys[te])
+                else:
+                    Xtr, ytr, Xte, yte = Xs[tr], ys[tr], Xs[te], ys[te]
+                m.fit(Xtr, ytr)
+                errs.append(float(np.mean((m.predict(Xte) - yte) ** 2)))
             except Exception:          # noqa: BLE001
                 errs = []
                 break
@@ -268,13 +296,23 @@ class FitResult:
 
 
 def _score(pred: np.ndarray, y: np.ndarray) -> tuple:
-    """(R², 年化 TE)。R² 下限截到 0，避免负值污染平均。"""
+    """
+    (R², 年化 TE)。
+
+    ★ R² **保留原始值，包括负数**（P0-05）。旧实现用 max(0.0, ·) 把负值截到 0，
+    效果是把"模型彻底失败"伪装成"模型恰好没有解释力"——真实 R² = −3 会显示成 0。
+    负 R² 恰恰是识别失效窗口最直接的诊断量，截断等于销毁证据。
+
+    y 为常数（sst ≈ 0）时 R² 在数学上无定义，返回 NaN 而不是 0 或 −∞：
+    NaN 会被中位数/均值自动跳过，也不会被误当成"极差的拟合"。
+    """
     resid = np.asarray(pred, dtype=float) - y
     sse = float(resid @ resid)
-    sst = float(((y - y.mean()) ** 2).sum()) or 1e-12
-    r2 = max(0.0, 1.0 - sse / sst)
+    sst = float(((y - y.mean()) ** 2).sum())
     te = float(np.std(resid, ddof=1) * np.sqrt(252)) if len(resid) > 1 else np.nan
-    return r2, te
+    if not np.isfinite(sst) or sst <= 1e-18:
+        return float("nan"), te          # 目标无变异 → R² 未定义
+    return 1.0 - sse / sst, te
 
 
 # ====================================================================== 各模型实现
@@ -294,7 +332,18 @@ def _fit_enet(X, y, cols, equity_ratio, prm):
             yield (lambda a=a: ElasticNet(alpha=a, l1_ratio=l1, positive=True,
                                           fit_intercept=True, max_iter=20000,
                                           tol=1e-5))
-    mdl, _ = _ts_cv_mse(factory, Xs, ys)
+
+    # ★ P1-02：内层 CV 的标准化必须**只用该折的训练段**拟合，
+    #   再用它变换同一折的验证段。上面 Xs/ys 的全窗口标准化只用于
+    #   "最后在全样本上重新拟合"那一步，不参与选参。
+    def _fold_standardize(Xtr, ytr, Xte, yte):
+        mu, sd = Xtr.mean(0), Xtr.std(0)
+        sd = np.where(sd == 0, 1.0, sd)
+        ym, ysd = ytr.mean(), (ytr.std() or 1.0)
+        return ((Xtr - mu) / sd, (ytr - ym) / ysd,
+                (Xte - mu) / sd, (yte - ym) / ysd)
+
+    mdl, _ = _ts_cv_mse(factory, Xs, ys, transform=_fold_standardize)
     if mdl is None:
         mdl = ElasticNet(alpha=grid[0], l1_ratio=l1, positive=True,
                          max_iter=20000).fit(Xs, ys)
@@ -307,7 +356,8 @@ def _fit_enet(X, y, cols, equity_ratio, prm):
     if sup.size > int(prm.get("max_assets", 8)):
         sup = sup[np.argsort(-np.abs(coef[sup]))[:int(prm.get("max_assets", 8))]]
 
-    w_s = _constrained_fit(X[:, sup], y, equity_ratio)
+    st: Dict[str, Any] = {}
+    w_s = _constrained_fit(X[:, sup], y, equity_ratio, status=st)
     w_full = np.zeros(X.shape[1])
     w_full[sup] = w_s
     w = _clean_weights(w_full, cols, equity_ratio,
@@ -317,7 +367,10 @@ def _fit_enet(X, y, cols, equity_ratio, prm):
     r2, te = _score(X @ wv, y)
     return FitResult(weights=w, pred=X @ wv, r2=r2, te=te,
                      extra={"alpha": float(mdl.alpha), "l1_ratio": l1,
-                            "n_support": int(sup.size)})
+                            "n_support": int(sup.size),
+                            # ★ 优化失败会静默退回等权（P0-05），这里如实上报：
+                            #   1 = SLSQP 收敛，0 = 已降级。聚合后是"收敛率"。
+                            "fit_ok": 1.0 if st.get("ok", True) else 0.0})
 
 
 def _fit_lasso(X, y, cols, equity_ratio, prm):
@@ -829,6 +882,9 @@ class ModelZoo:
     def __init__(self, cfg: Optional[dict] = None):
         self.cfg = cfg or C.RBSA
         self.max_rebal = int((cfg or C.RBSA).get("max_rebal", 0)) or None
+        # "linspace" = 按样本总长度均匀抽稀（快，但历史点会随追加数据漂移）
+        # "calendar" = 固定日历锚点（前缀稳定，研究结论应使用它）
+        self.rebal_mode = str((cfg or C.RBSA).get("rebal_mode", "linspace"))
 
     @staticmethod
     def _rebal_idx(n: int, W: int, refit: int, max_rebal: Optional[int] = None
@@ -850,6 +906,46 @@ class ModelZoo:
             sel = _np.linspace(0, len(idx) - 1, max_rebal).round().astype(int)
             idx = [idx[i] for i in dict.fromkeys(sel.tolist())]
         return idx
+
+    @staticmethod
+    def _rebal_calendar(n: int, W: int, refit: int,
+                        max_rebal: Optional[int] = None,
+                        dates=None, freq: str = "QE") -> List[int]:
+        """
+        **固定日历**重估点（P0-04 修复路径①）。
+
+        `_rebal_idx` 用 `linspace(0, len-1, max_rebal)` 均匀抽稀，采样位置由
+        **样本总长度**决定 —— 追加 100 行数据，历史重估点里就有 52/60 个发生
+        位移，历史输出被未来数据改写（实测）。
+
+        这里改为按**自然日历锚点**（默认每季度末）取"锚点之后的第一个 refit 点"。
+        锚点只由日期决定，追加未来数据不会移动历史锚点 → 前缀稳定。
+        代价：每季一个点的密度低于 linspace 的 60 点，长样本下更粗。
+
+        dates 为完整日期索引；freq 传 pandas 偏移别名（"QE" 季、"ME" 月）。
+        """
+        idx = list(range(W, n, refit))
+        if not idx or dates is None:
+            return idx
+        di = pd.DatetimeIndex(dates)
+        if len(di) < n:                       # 保险：dates 与 n 不匹配则退回原法
+            return ModelZoo._rebal_idx(n, W, refit, max_rebal)
+        try:
+            anchors = pd.date_range(di[0], di[-1], freq=freq)
+        except Exception:                     # noqa: BLE001
+            return ModelZoo._rebal_idx(n, W, refit, max_rebal)
+        out = []
+        for a in anchors:
+            j = int(np.searchsorted(di.values, np.datetime64(a), side="right"))
+            k = int(np.searchsorted(idx, j, side="left"))
+            if k < len(idx):
+                out.append(idx[k])
+        out = sorted(set(out))
+        # 仍需限流时，从尾部**丢弃**而不是重新抽稀（丢弃不改变已选点的位置）
+        if max_rebal and len(out) > max_rebal:
+            step = int(np.ceil(len(out) / max_rebal))
+            out = out[::step]
+        return out
 
     # -------------------------------------------------------------- 主入口
     def run(self, px: pd.DataFrame, model_keys: List[str],
@@ -882,7 +978,11 @@ class ModelZoo:
         if n < W + 60:
             raise ValueError(f"样本不足：仅 {n} 行，滚动窗口需要 {W}+60。")
         mr = max_rebal if max_rebal is not None else self.max_rebal
-        rebal_idx = self._rebal_idx(n, W, cfg["refit"], mr)
+        # rebal_mode="calendar" → 固定日历锚点，追加数据不改变历史重估点（P0-04）
+        if str(cfg.get("rebal_mode", self.rebal_mode)) == "calendar":
+            rebal_idx = self._rebal_calendar(n, W, cfg["refit"], mr, dates)
+        else:
+            rebal_idx = self._rebal_idx(n, W, cfg["refit"], mr)
 
         keys = list(model_keys)
         if not keys:
@@ -939,6 +1039,7 @@ class ModelZoo:
         cfg = self.cfg
         rows, fit_r2s, fit_tes, extras = [], [], [], []
         diag_rows, equities = [], []
+        n_fallback = 0          # 黑箱预测失败、回退成重要性权重的窗口数
         syn = pd.Series(index=dates[rebal_idx[0]:], dtype=float)
         last_w = None
         last_date = None
@@ -977,6 +1078,7 @@ class ModelZoo:
             next_i = rebal_idx[k + 1] if k + 1 < len(rebal_idx) else len(dates)
             j_end = min(next_i, len(dates))
             X_next = X_all[i:j_end]
+            degraded = ""
             if fr.predictor is not None:
                 # 黑箱模型：用「上一窗口拟合好的估计器」预测下一段，
                 # 这是真正的样本外（前向）预测。
@@ -984,8 +1086,14 @@ class ModelZoo:
                     seg = np.asarray(fr.predictor(X_next), dtype=float)
                     if not np.all(np.isfinite(seg)):
                         raise ValueError("预测含非有限值")
-                except Exception:          # noqa: BLE001
+                except Exception as e:      # noqa: BLE001
+                    # ★ 旧实现在这里静默回退成 X_next @ w_full，而 w_full 是
+                    #   **重要性权重**（非负、Σ=equity_ratio），把它当线性持仓
+                    #   得到的收益会被记成该黑箱模型的样本外结果 ——
+                    #   失败被伪装成成功，且没有任何痕迹。现在如实记录（P0-05）。
                     seg = X_next @ w_full
+                    degraded = f"blackbox_fallback:{type(e).__name__}"
+                    n_fallback += 1
             else:
                 # 线性约束模型：合成收益 = X @ w，权重和 = 股票仓位
                 seg = X_next @ w_full
@@ -995,7 +1103,8 @@ class ModelZoo:
             fit_r2s.append(fr.r2)
             fit_tes.append(fr.te)
             diag_rows.append({"date": dates[i - 1], "r2": fr.r2, "te": fr.te,
-                              "alpha": fr.extra.get("alpha")})
+                              "alpha": fr.extra.get("alpha"),
+                              "degraded": degraded or None})
             if fr.extra:
                 extras.append(fr.extra)
             last_w, last_date = fr.weights, dates[i - 1]
@@ -1025,6 +1134,10 @@ class ModelZoo:
         agg_extra: Dict[str, Any] = {}
         if equities:
             agg_extra["equity_used"] = float(np.median(equities))
+        # ★ 降级必须可观测：黑箱回退窗口数 / 有效窗口数（P0-05）
+        if diag_rows:
+            agg_extra["fallback_windows"] = int(n_fallback)
+            agg_extra["fallback_ratio"] = float(n_fallback) / len(diag_rows)
         if extras:
             allk = set().union(*[set(e.keys()) for e in extras])
             for k in allk:

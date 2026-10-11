@@ -67,6 +67,9 @@ def main():
         for c, e in fail:
             print(f"  {c}: {e}")
         print("可重跑本命令补齐（已成功的会命中缓存，不会重复请求）")
+        # ★ P1-09：必需步骤失败必须有非零退出码。旧实现一律 return 0，
+        #   于是 CI 里"只预热了一半"和"全部成功"完全无法区分。
+        return 1
     return 0
 
 

@@ -59,11 +59,16 @@ def default_grid() -> List[dict]:
 # ------------------------------------------------------------------ 单配置评估
 def eval_config(nav: pd.Series, syn_nav: pd.Series,
                 weights: pd.DataFrame, pe: Optional[pd.DataFrame],
-                cfg: dict, reb: int) -> Optional[dict]:
+                cfg: dict, reb: int,
+                bt_cfg: Optional[dict] = None) -> Optional[dict]:
     """
     在一只基金上跑一个配置，返回超额序列与其年化/IR。
 
     超额口径与 run_backtest 完全一致：在超额日序列上算信息比率（不扣 rf）。
+
+    bt_cfg 可覆盖回测层配置（如 `warmup`）。做**时间切片**时必须传：
+    默认 warmup=252 天，而一个测试折只有两三百天，预热就把它吃光了，
+    结果是该折所有配置都返回 None（时间向前验证会静默地"没有结论"）。
     """
     from .backtest import run_backtest
     from .signal import SignalEngine
@@ -74,11 +79,15 @@ def eval_config(nav: pd.Series, syn_nav: pd.Series,
         raw = sig["position_raw"]
         mask = np.zeros(len(raw), dtype=bool)
         mask[::reb] = True
-        pos = raw.where(pd.Series(mask, index=raw.index)).ffill().bfill()
-        pos = pos.reindex(nav.index).ffill().fillna(1.0)
+        # ★ 禁止 bfill（P0-04）：序列开头的 NaN 若从后面回填，那么"只给我训练段"
+        #   与"给我整段再截取"会得到不同的历史仓位 —— 时间向前验证会被自己污染。
+        #   预热段一律用中性仓位 0.5 补齐。
+        pos = raw.where(pd.Series(mask, index=raw.index)).ffill().fillna(0.5)
+        pos = pos.reindex(nav.index).ffill().fillna(0.5)
         sig2 = pd.DataFrame({"position_final": pos,
                              "score": pd.Series(0.5, index=pos.index)})
-        bt = run_backtest(nav, sig2, cfg=dict(cfg), main_name="候选")
+        bt = run_backtest(nav, sig2, cfg={**dict(cfg), **(bt_cfg or {})},
+                          main_name="候选")
     except Exception:                                      # noqa: BLE001
         return None
     cn = bt["control_name"]
@@ -200,6 +209,11 @@ def walk_forward(per_fund: Dict[str, dict], grid: Optional[List[dict]] = None
         "global_best": f"{global_best[0]}/{global_best[1]}",
         "picks": picks,
         "summary": {
+            # ★ P0-03：本函数**没有**时间切分——它先在每只基金的**全时间段**上
+            # 算完绩效，再按管理人划分选参。所以它检验的是"参数能否迁移到
+            # 未见过的管理人"，**不是**"参数能否迁移到未来的时间段"。
+            # 结论里不得出现"时间向前验证通过""可实现"这类措辞。
+            "检验类型": "按管理人分组的横截面迁移检验（非时间向前验证）",
             "全体最优配置": f"{global_best[0]}/{global_best[1]}",
             "固定配置在测试集均值IR": round(fixed_ir, 3),
             "迁移配置在测试集均值IR": round(migrated_ir, 3),
@@ -208,4 +222,157 @@ def walk_forward(per_fund: Dict[str, dict], grid: Optional[List[dict]] = None
             "选择一致性": f"{len(set(picks))}/{len(picks)} 折选出同一配置",
         },
         "table": table,
+    }
+
+
+# ====================================================================== 时间向前验证
+def _cut(obj, start, end):
+    """把 Series/DataFrame 裁到 [start, end]；None 原样返回。"""
+    if obj is None:
+        return None
+    if isinstance(obj, pd.Series):
+        return obj.loc[(obj.index >= start) & (obj.index <= end)]
+    return obj.loc[(obj.index >= start) & (obj.index <= end)]
+
+
+def time_folds(all_days: pd.DatetimeIndex, n_folds: int = 3,
+               purge_days: int = 20, min_train_frac: float = 0.40
+               ) -> List[tuple]:
+    """
+    外层**按时间扩展**切分（P0-03）。
+
+    返回 [(train_start, train_end, test_start, test_end), ...]。
+    训练期恒早于测试期，且测试期起点与训练期末尾之间留出 `purge_days`
+    个交易日的间隔 —— 因为配置里含 `trend_mom/win` 这类前瞻标签，
+    跨越边界的标签会把训练段的"未来"带进测试段。
+
+    注意：这些日期是**全体基金交易日的并集**上的切分，对每只基金再各自裁剪，
+    因此不同基金的可用区间可能略有差异（停牌、成立较晚等）。
+    """
+    n = len(all_days)
+    if n < 200 or n_folds < 1:
+        return []
+    lo = int(n * float(np.clip(min_train_frac, 0.1, 0.8)))
+    edges = np.linspace(lo, n - 1, n_folds + 1).round().astype(int)
+    out = []
+    for i in range(n_folds):
+        tr_end_i = int(edges[i])
+        te_end_i = int(edges[i + 1])
+        te_start_i = min(tr_end_i + int(purge_days), te_end_i - 1)
+        if te_start_i <= tr_end_i or te_start_i >= te_end_i:
+            continue
+        out.append((all_days[0], all_days[tr_end_i],
+                    all_days[te_start_i], all_days[te_end_i]))
+    return out
+
+
+def walk_forward_time(per_fund: Dict[str, dict], grid: Optional[List[dict]] = None,
+                      n_folds: int = 3, purge_days: int = 20,
+                      min_train_frac: float = 0.40) -> dict:
+    """
+    **真正的时间向前验证**（P0-03）。
+
+    与 `walk_forward`（按管理人分折）的区别：
+      · `walk_forward` 先用**全时间段**算出每只基金的绩效，再按管理人划分
+        训练集/测试集 → 检验的是"参数能否迁移到未见过的**管理人**"，
+        任何一折的训练期都覆盖了测试期的时间范围。
+      · 本函数先按**时间**切分，内层只用训练期的数据选模型/参数/阈值，
+        再在**训练期之后的测试期**上评估 → 检验的是"参数能否迁移到**未来**"。
+
+    两者正交，应同时报告。配置选择、oracle 与"过拟合代价"的定义与
+    `walk_forward` 保持一致，便于对照。
+    """
+    codes = [c for c in C.EXTENDED_FUNDS if c in per_fund]
+    if len(codes) < 2:
+        return {"ok": False, "reason": f"样本不足：只有 {len(codes)} 只基金"}
+    grid = grid or default_grid()
+
+    days = None
+    for c in codes:
+        d = per_fund[c]
+        idx = d["nav"].index
+        days = idx if days is None else days.union(idx)
+    days = pd.DatetimeIndex(sorted(days))
+    folds = time_folds(days, n_folds, purge_days, min_train_frac)
+    if not folds:
+        return {"ok": False, "reason": "可用交易日不足以做时间切分"}
+
+    def _table(slice_range) -> Dict[str, Dict[tuple, dict]]:
+        s0, s1 = slice_range
+        tb: Dict[str, Dict[tuple, dict]] = {}
+        for c in codes:
+            d = per_fund[c]
+            sub = {k: (_cut(v, s0, s1) if k in ("nav", "syn_nav", "weights", "pe")
+                       else v) for k, v in d.items()}
+            nav_len = len(sub.get("nav", []))
+            if nav_len < 160:                # 少于此时连一个评估窗口都撑不起来
+                continue
+            # ★ 预热必须按切片长度缩放：默认的 252 天会把两三百天的测试折吃光，
+            #   导致该折所有配置返回 None（表现为"没有结论"而非"结论为负"）。
+            bt_cfg = {"warmup": int(min(252, max(20, nav_len * 0.25)))}
+            tb[c] = {}
+            for g in grid:
+                r = eval_config(sub["nav"], sub["syn_nav"], sub["weights"],
+                                sub["pe"], g["cfg"], g["reb"], bt_cfg=bt_cfg)
+                if r is not None:
+                    tb[c][(g["win"], g["reb"])] = r
+        return tb
+
+    def _mean_ir(tb: Dict[str, Dict[tuple, dict]], key) -> float:
+        vals = [tb[c][key]["超额夏普"] for c in tb if key in tb[c]]
+        return float(np.mean(vals)) if vals else float("nan")
+
+    rows, oos_parts = [], []
+    for fi, (s0, s1, t0, t1) in enumerate(folds, 1):
+        tr = _table((s0, s1))
+        te = _table((t0, t1))
+        keys = sorted({k for c in tr for k in tr[c]})
+        if not keys or not te:
+            rows.append({"折": fi, "训练区间": f"{s0.date()}~{s1.date()}",
+                         "测试区间": f"{t0.date()}~{t1.date()}",
+                         "备注": "该折无可用配置（样本过短）"})
+            continue
+        best_key = max(keys, key=lambda k: (_mean_ir(tr, k)
+                                            if np.isfinite(_mean_ir(tr, k))
+                                            else -9e9))
+        oracle_key = max(keys, key=lambda k: (_mean_ir(te, k)
+                                              if np.isfinite(_mean_ir(te, k))
+                                              else -9e9))
+        migrated = _mean_ir(te, best_key)
+        oracle = _mean_ir(te, oracle_key)
+        rows.append({
+            "折": fi,
+            "训练区间": f"{s0.date()}~{s1.date()}",
+            "测试区间": f"{t0.date()}~{t1.date()}",
+            "训练基金数": len(tr), "测试基金数": len(te),
+            "训练最优配置": f"{best_key[0]}/{best_key[1]}",
+            "训练集IR": round(_mean_ir(tr, best_key), 3),
+            "测试集IR(迁移)": round(migrated, 3) if np.isfinite(migrated) else np.nan,
+            "测试集IR(oracle)": round(oracle, 3) if np.isfinite(oracle) else np.nan,
+            "过拟合代价": (round(oracle - migrated, 3)
+                        if np.isfinite(oracle) and np.isfinite(migrated) else np.nan),
+        })
+        for c in te:
+            if best_key in te[c]:
+                oos_parts.append(te[c][best_key]["excess"].rename(f"{c}|折{fi}"))
+
+    df = pd.DataFrame(rows)
+    oos = pd.concat(oos_parts, axis=1) if oos_parts else pd.DataFrame()
+    mig = df.get("测试集IR(迁移)", pd.Series(dtype=float))
+    orc = df.get("测试集IR(oracle)", pd.Series(dtype=float))
+    return {
+        "ok": True,
+        "检验类型": "外层按时间扩展的时间向前验证（内层仅用训练期选参）",
+        "folds": df,
+        "oos_excess": oos,
+        "summary": {
+            "折数": len(df),
+            "purge(交易日)": int(purge_days),
+            "迁移配置在测试期均值IR": (round(float(np.nanmean(mig)), 3)
+                                if len(mig) else np.nan),
+            "oracle在测试期均值IR": (round(float(np.nanmean(orc)), 3)
+                               if len(orc) else np.nan),
+            "参数选择过拟合代价": (round(float(np.nanmean(orc) - np.nanmean(mig)), 3)
+                          if len(mig) and len(orc) else np.nan),
+        },
     }

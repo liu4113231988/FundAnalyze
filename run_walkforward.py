@@ -23,11 +23,12 @@ from pathlib import Path
 warnings.filterwarnings("ignore")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import numpy as np
 import pandas as pd
 
 from src import config as C, data as D
 from src.rbsa import RBSA
-from src.walkforward import walk_forward, default_grid
+from src.walkforward import (walk_forward, walk_forward_time, default_grid)
 
 pd.set_option("display.width", 200)
 
@@ -71,7 +72,8 @@ def main():
     print("\n[汇总]")
     print(f"  全体样本最优配置          : {s['全体最优配置']}   ← E4 报告的就是这个")
     print(f"  固定配置 迁移到测试集 IR   : {s['固定配置在测试集均值IR']:+.3f}")
-    print(f"  逐折自选  迁移到测试集 IR  : {s['迁移配置在测试集均值IR']:+.3f}   ← 这是可实现的上限")
+    print(f"  逐折自选  迁移到测试集 IR  : {s['迁移配置在测试集均值IR']:+.3f}   "
+          f"← 横截面迁移口径下的上限（★ 不等于时间维度可实现）")
     print(f"  oracle（用测试集本身）  IR : {s['oracle在测试集均值IR']:+.3f}   ← 不可实现的上界")
     print(f"  ★ 参数选择过拟合代价       : {s['参数选择过拟合代价']:+.3f}")
     print(f"  选择一致性                 : {s['选择一致性']}")
@@ -98,10 +100,40 @@ def main():
           if False else
           f"  （E4 报告的 +0.352 是全样本口径，这里的固定配置迁移 IR 才是可实现值）")
 
+    # ---- E9b：真正的时间向前验证（P0-03）
+    # walk_forward 的每一折都覆盖了同一段时间，只隔离了管理人；
+    # 它**不能**回答"参数能否迁移到未来"。这一段才是时间维度的检验。
+    print("\n" + "=" * 108)
+    print("E9b · 时间向前验证（外层按时间扩展，内层只用训练期选参）")
+    print("=" * 108)
+    res_t = walk_forward_time(per_fund)
+    if not res_t.get("ok"):
+        print(f"  跳过：{res_t.get('reason')}")
+    else:
+        print(res_t["folds"].to_string(index=False))
+        st = res_t["summary"]
+        print("\n[汇总]")
+        for k, v in st.items():
+            print(f"  {k:24s}: {v}")
+        mig_t, cost_t = st["迁移配置在测试期均值IR"], st["参数选择过拟合代价"]
+        ok_mig = isinstance(mig_t, float) and np.isfinite(mig_t) and mig_t > 0
+        ok_cost = isinstance(cost_t, float) and np.isfinite(cost_t) and cost_t < 0.10
+        if ok_mig and ok_cost:
+            print("  ★ 时间维度也站得住：训练期选出的参数在未来仍然为正")
+        else:
+            print("  ★ 时间维度不成立：训练期选出的参数在未来不再为正，"
+                  "或过拟合代价过大 —— E9 的横截面结论不得外推为时间泛化")
+
     out = C.RES_DIR
     res["folds"].to_csv(out / "E9_分折验证_逐折.csv", index=False, encoding="utf-8-sig")
     pd.DataFrame([{"指标": k, "值": v} for k, v in s.items()]).to_csv(
         out / "E9_分折验证_汇总.csv", index=False, encoding="utf-8-sig")
+    if res_t.get("ok"):
+        res_t["folds"].to_csv(out / "E9b_时间向前验证_逐折.csv",
+                              index=False, encoding="utf-8-sig")
+        pd.DataFrame([{"指标": k, "值": v}
+                      for k, v in res_t["summary"].items()]).to_csv(
+            out / "E9b_时间向前验证_汇总.csv", index=False, encoding="utf-8-sig")
     print(f"\n总耗时 {time.time()-t0:.0f}s  结果写入 {out}")
     return 0 if ok else 0
 

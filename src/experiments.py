@@ -164,7 +164,10 @@ def lowfreq_grid(nav: pd.Series, syn_nav: pd.Series, weights: pd.DataFrame,
             raw = sig["position_raw"].copy()
             mask = np.zeros(len(raw), dtype=bool)
             mask[::R] = True
-            sampled = raw.where(pd.Series(mask, index=raw.index)).ffill().bfill()
+            # ★ 禁止 bfill（P0-04）：它会把后面才算出的仓位回填到序列开头，
+            #   历史输出会随"给多少数据"而变。预热段用中性值 0.5 补齐。
+            sampled = raw.where(pd.Series(mask, index=raw.index)).ffill()
+            sampled = sampled.fillna(0.5)
             # ★ main_name 必须是被评估的那个方案，否则恒定仓位对照会按
             # sig["position_final"]（日频 EMA+死区）的平均仓位构造，
             # 与 sampled（每 R 天采样的 position_raw）的平均仓位不一致，
@@ -178,8 +181,10 @@ def lowfreq_grid(nav: pd.Series, syn_nav: pd.Series, weights: pd.DataFrame,
             #   不能用 metrics 表里两个几何夏普相减 —— 夏普不可加。
             #   旧写法在同一份数据上给出 100% 为正，正确口径下只有 9/14。
             ca = bt["timing_contrib_all"].get("低频再平衡", {})
-            avg_pos = float(sampled.reindex(nav.index).ffill()
-                            .loc[bt["window_start"]:bt["window_end"]].mean())
+            # 平均暴露必须用 backtest 的 pos_eff 口径（窗口首日执行的是前一日
+            # 决定的仓位），自己按 sampled 直接取均值会与对照组构造口径不一致
+            # （P0-02），差出来的千分之几会被全额记进"超额"。
+            avg_pos = float(bt["avg_position_all"].get("低频再平衡", np.nan))
             rows.append({
                 "信号窗口": win, "再平衡周期": R,
                 "策略年化": m.loc["低频再平衡", "年化收益"],
@@ -302,3 +307,89 @@ def summarize_funds(results: Dict[str, dict]) -> pd.DataFrame:
     if len(df):
         df.loc["均值"] = ["—", "平均"] + list(df.iloc[:, 2:].mean().round(4))
     return df
+
+
+# ====================================================================== 朴素基准（P2-02）
+def naive_benchmarks(panel: pd.DataFrame, fund_col: str = "__FUND__",
+                     equity_ratio: float = 0.9, train_frac: float = 0.7,
+                     max_single: int = 5) -> pd.DataFrame:
+    """
+    风格画像的**朴素基准对照**（P2-02）。
+
+    为什么要它：一个共线指数池上的非负稀疏回归，几乎总能"拟合出"一个
+    看起来合理的权重组合；窗口内 R² = 0.9 并不能说明模型有解释力 ——
+    它同样可能只是"指数足够多"。所以必须回答：
+
+        这套权重，比"只用沪深300""所有指数等权"好多少？
+
+    基准（全部只用训练段定权，测试段不再调整）：
+      · 单一宽基  ：每个候选指数单独做无约束回归（β），取表现最好的几个
+      · 等权混合  ：全部指数等权，缩放到目标仓位
+      · 相关加权  ：按训练段与基金的相关度排序取前 8 个等权
+      · 受约束回归：非负 + Σw=equity_ratio（即 RBSA 的口径，作为参照系）
+
+    R² 与模型层一致，**保留负值**（P0-05）：负的样本外 R² 是"不如常数"
+    的直接证据，截到 0 就看不出来了。
+    """
+    from .models import _constrained_fit
+
+    px = panel.astype(float)
+    R = np.log(px).diff().dropna()
+    assets = [c for c in px.columns if c != fund_col]
+    X, y = R[assets].values, R[fund_col].values
+    n = len(y)
+    sp = int(n * float(np.clip(train_frac, 0.3, 0.9)))
+    if sp < 60 or n - sp < 60:
+        return pd.DataFrame()
+    Xtr, ytr, Xte, yte = X[:sp], y[:sp], X[sp:], y[sp:]
+
+    def _r2(pred, yy):
+        sse = float(((np.asarray(pred) - yy) ** 2).sum())
+        sst = float(((yy - yy.mean()) ** 2).sum())
+        return float("nan") if sst <= 1e-18 else 1.0 - sse / sst
+
+    rows = []
+
+    def _add(name, w):
+        w = np.asarray(w, dtype=float)
+        rows.append({
+            "基准": name,
+            "有效指数数": int((np.abs(w) > 1e-9).sum()),
+            "Σw": float(w.sum()),
+            "样本内R²": _r2(Xtr @ w, ytr),
+            "样本外R²": _r2(Xte @ w, yte),
+            "样本外年化TE": float(np.std(Xte @ w - yte, ddof=1) * np.sqrt(252)),
+        })
+
+    # 1) 单一宽基：各指数单独回归，取样本内最优的若干个
+    singles = []
+    for j, a in enumerate(assets):
+        var = float(np.var(Xtr[:, j]))
+        if var <= 1e-18:
+            continue
+        b = float(np.cov(ytr, Xtr[:, j])[0, 1] / var)
+        singles.append((_r2(b * Xtr[:, j], ytr), j, b, a))
+    singles.sort(reverse=True)
+    for r2in, j, b, a in singles[:max(1, max_single)]:
+        w = np.zeros(len(assets))
+        w[j] = b
+        _add(f"单一：{C.NAME_OF.get(a, a)}", w)
+
+    # 2) 等权混合
+    _add(f"等权混合（{len(assets)} 指数）",
+         np.full(len(assets), equity_ratio / max(len(assets), 1)))
+
+    # 3) 按相关度取前 8 等权（缩放）
+    corr = np.array([abs(np.corrcoef(Xtr[:, j], ytr)[0, 1])
+                     for j in range(len(assets))])
+    corr = np.nan_to_num(corr)
+    top = np.argsort(-corr)[:min(8, len(assets))]
+    w = np.zeros(len(assets))
+    w[top] = equity_ratio / len(top)
+    _add(f"相关Top{len(top)}等权", w)
+
+    # 4) 受约束非负回归（RBSA 口径）
+    w = _constrained_fit(Xtr, ytr, equity_ratio)
+    _add(f"受约束回归（Σw={equity_ratio:.0%}）", w)
+
+    return pd.DataFrame(rows)

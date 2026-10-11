@@ -200,9 +200,13 @@ class SignalEngine:
         if reb > 1:
             mask = np.zeros(len(raw), dtype=bool)
             mask[::reb] = True
-            pos = raw.where(pd.Series(mask, index=raw.index)).ffill().bfill()
+            # ★ 不能用 bfill()（P0-04）：它会把**后面**才算出来的波动率回填到
+            #   序列开头，于是"只给我前 30 天"和"给我整段"会得到不同的首日仓位
+            #   —— 历史输出被未来数据改写。预热期缺失必须用显式中性值补齐。
+            pos = raw.where(pd.Series(mask, index=raw.index)).ffill()
         else:
             pos = raw
+        # 中性值 1.0 = 波动率目标尚未就绪时不主动降仓（等价于不调整）
         pos = pos.fillna(1.0)
         if idx is not None:
             pos = pos.reindex(idx, method="ffill").fillna(1.0)

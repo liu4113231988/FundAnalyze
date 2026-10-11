@@ -29,6 +29,23 @@
   · 分组单调性     : 按综合分五等分，看未来收益是否单调
   · 择时胜率       : 建议仓位 > 50% 时未来 h 日上涨的比例
   · 年化换手       : 双边换手倍数
+
+★ 可交易性边界（P1-01，尚未建模）
+--------------------------------
+本框架**没有**建模真实交易的时点与成本结构，因此它的输出是"研究口径的诊断"，
+不是可执行的交易方案。具体缺失：
+
+  1. 收盘后发布的基金净值何时可知、申赎以哪个净值成交、资金何时到账，
+     均未建模。当前假设"t 日信号 → t+1 日收盘到收盘收益"，对场外基金偏乐观。
+  2. 固定目标仓位隐含**持续再平衡**。`pos.diff()` 只统计目标仓位的变化，
+     未必等于维持该比例所需的实际成交量。
+  3. 成本只有单一的 `cost_rate`（按仓位变动计费）：不含申购费/持有期相关的
+     赎回费、滑点、初始建仓与终止清算。E10 用三档费率做了敏感性，
+     但那是"费率参数扫描"，不是真实的费用结构。
+  4. 「Σw 约束成立」只说明合成基准在统计上自洽，**不能**证明它可交易。
+
+日志收益加权用于拟合、自融资组合收益用于绩效，这两者也需要区分。
+在这些建模完成之前，回测数字只能用于横向比较与排序，不能当作预期收益。
 """
 from __future__ import annotations
 
@@ -43,6 +60,23 @@ from . import config as C
 # ------------------------------------------------------------------ 绩效指标
 def perf_metrics(ret: pd.Series, freq: int = 252, rf: float = None,
                  name: str = "") -> dict:
+    """
+    绩效指标。三个口径必须分清，不能混用：
+
+      · **年化收益** = 几何年化（CAGR）：(∏(1+r))^(252/n) − 1。
+        它是"净值实际增长了多少"，**不可加**——两个方案的 CAGR 之差没有意义。
+      · **夏普**   = (几何年化 − rf) / 年化波动。沿用几何年化口径，
+        因此也**不可加**（见 run_backtest 里 timing_contrib 的说明）。
+      · **算术夏普** = (mean(r) − rf/252) × 252 / (std(r) × √252)。
+        这是教科书 Sharpe 的常见写法，**可加**，用于需要跨方案做差或
+        做统计检验的场合。
+      · **IR（信息比率）** 在 run_backtest._contrib 里单独定义：
+        分子是**超额**日收益序列的均值×252，分母是该超额序列的年化波动。
+        它衡量的是"相对某个基准"，不是"相对无风险利率"，分子不再扣 rf。
+
+    最大回撤从**初始资本 1.0** 起算（净值曲线前置一个 1.0 点），
+    否则首日亏损不会被计入回撤。
+    """
     ret = ret.dropna()
     if len(ret) < 20:
         return {}
@@ -53,7 +87,15 @@ def perf_metrics(ret: pd.Series, freq: int = 252, rf: float = None,
     ann = eq.iloc[-1] ** (1 / years) - 1 if eq.iloc[-1] > 0 else -1.0
     vol = ret.std(ddof=1) * np.sqrt(freq)
     sharpe = (ann - rf) / vol if vol > 1e-9 else 0.0
-    dd = eq / eq.cummax() - 1
+    # 算术夏普：可加口径，用于跨方案求差与显著性检验
+    rf_d = (1 + rf) ** (1 / freq) - 1
+    ex_arith = ret.mean() - rf_d
+    sharpe_arith = (ex_arith * freq / vol) if vol > 1e-9 else 0.0
+
+    # 回撤：净值曲线前置初始资本 1.0，避免漏掉首日亏损
+    vals = np.concatenate([[1.0], (1.0 + ret.to_numpy()).cumprod()])
+    peak = np.maximum.accumulate(vals)
+    dd = pd.Series(vals[1:] / peak[1:] - 1.0, index=ret.index)
     mdd = float(dd.min())
     calmar = ann / abs(mdd) if mdd < -1e-9 else 0.0
     monthly = (1 + ret).resample("ME").prod() - 1
@@ -62,6 +104,7 @@ def perf_metrics(ret: pd.Series, freq: int = 252, rf: float = None,
         "年化收益": ann,
         "年化波动": vol,
         "夏普": sharpe,
+        "算术夏普": sharpe_arith,
         "最大回撤": mdd,
         "Calmar": calmar,
         "月胜率": float((monthly > 0).mean()) if len(monthly) else np.nan,
@@ -161,15 +204,33 @@ def run_backtest(nav: pd.Series, sig: pd.DataFrame, cfg: Optional[dict] = None,
                    for k, v in variant_pos.items()}
     ctrl_series: Dict[str, pd.Series] = {}
     controls: Dict[str, str] = {}
+    control_labels: Dict[str, str] = {}
     avg_position_all: Dict[str, float] = {}
+    _ctrl_by_fm: Dict[float, str] = {}    # 精确平均暴露 → 对照唯一键
+    _used: set = set()
     for vname, pos_v in variant_pos.items():
-        fm = float(pos_v.loc[start:end].mean())
+        # ★ 平均暴露按**实际生效的持仓** pos_eff = pos_v.shift(1) 计算：
+        #   窗口第一天执行的是 start 前一日决定的仓位（回测口径同理），
+        #   直接用 pos_v 会把首日算成"决策日仓位"，与真实暴露差一档。
+        fm = float(pos_v.shift(1).fillna(0.5).loc[start:end].mean())
         if not np.isfinite(fm):
             fm = 0.5
         avg_position_all[vname] = fm
-        cname = f"恒定仓位({fm:.0%})"
-        if cname not in ctrl_series:      # 平均仓位相同的方案共用同一份对照
-            ctrl_series[cname] = pd.Series(fm, index=idx)
+        if fm in _ctrl_by_fm:             # 平均暴露完全相同 → 合法共用同一份对照
+            controls[vname] = _ctrl_by_fm[fm]
+            continue
+        # ★ 对照键必须携带足够精度：旧实现用 .0% 四舍五入，导致 50.1% 与
+        #   50.4% 两个方案共用"恒定仓位(50%)"，后者凭空多出虚假超额。
+        #   这里用 .1%，并在展示名仍撞车时追加序号，保证**身份唯一**。
+        base = f"恒定仓位({fm:.1%})"
+        cname, k = base, 2
+        while cname in _used:
+            cname = f"{base}#{k}"
+            k += 1
+        _used.add(cname)
+        _ctrl_by_fm[fm] = cname
+        ctrl_series[cname] = pd.Series(fm, index=idx)
+        control_labels[cname] = base
         controls[vname] = cname
 
     all_pos = {**variant_pos, **ctrl_series}
@@ -215,8 +276,13 @@ def run_backtest(nav: pd.Series, sig: pd.DataFrame, cfg: Optional[dict] = None,
     score_oos = sig["score"].reindex(idx).ffill().loc[start:end]
     fwd_oos = fwd.reindex(score_oos.index)
     lm, sm = (score_oos > 0), (score_oos < 0)
-    win_long = float((fwd_oos[lm] > 0).mean()) if lm.any() else np.nan
-    win_short = float((fwd_oos[sm] < 0).mean()) if sm.any() else np.nan
+    # ★ 分母只计**有效前瞻标签**：窗口尾部 fwd_horizon 天没有完整未来收益，
+    #   fwd 为 NaN，而 `NaN > 0` 会被判为 False —— 旧实现把它们算进分母，
+    #   于是"持续上涨样本"的多头胜率也不是 100%（窗口越短，拉低越多）。
+    fl, fs = fwd_oos[lm].dropna(), fwd_oos[sm].dropna()
+    win_long = float((fl > 0).mean()) if len(fl) else np.nan
+    win_short = float((fs < 0).mean()) if len(fs) else np.nan
+    n_valid_label = int(len(fl) + len(fs))
 
     # ------------------------------ 择时净贡献（每个方案 − 它自己的恒定仓位对照）
     # ★ 夏普与年化收益都**不可加**，所以不能拿 metrics 表里的两行相减：
@@ -281,6 +347,8 @@ def run_backtest(nav: pd.Series, sig: pd.DataFrame, cfg: Optional[dict] = None,
         "ic": ic, "icir": icir, "roll_ic": roll_ic,
         "groups": groups,
         "win_long": win_long, "win_short": win_short,
+        "n_valid_label": n_valid_label,
+        "control_labels": control_labels,
         "turnover": turnover_all.get(main_name, float("nan")),
         "turnover_all": turnover_all,
         "avg_position": avg_position_all.get(main_name, float("nan")),

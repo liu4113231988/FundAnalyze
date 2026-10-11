@@ -1,0 +1,17 @@
+# 精确版本锁定（P1-09）
+#
+# 用途：复现某一批研究结果时，用 `pip install -r requirements.lock.txt`
+# 装出与当时完全一致的环境。生成于 2026-10-11，Python 3.13.14 / win32。
+#
+# 这些版本只是"本机当前装着的、且离线回归全绿"的组合，
+# 不等于做过跨版本兼容性测试。升级任一版本都应重跑 tests/ 下的回归。
+
+akshare==1.19.1
+Flask==3.1.3
+flask-cors==6.0.5
+matplotlib==3.11.2
+numpy==2.4.4
+pandas==3.0.6
+requests==2.33.1
+scikit-learn==1.9.1
+scipy==1.18.1

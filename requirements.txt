@@ -1,8 +1,16 @@
-akshare>=1.16
-pandas>=2.2
-numpy>=1.26
-scipy>=1.11
-scikit-learn>=1.4
-matplotlib>=3.8
-flask>=3.0          # Web 界面（webapp/）
-flask-cors>=4.0     # 允许跨域，便于前端单独部署
+# 运行依赖。下限保证"能装上"，上限锁定"研究结论是在哪套版本上跑出来的"。
+#
+# ★ P1-09：只有版本下限是不够的 —— pandas 2→3、numpy 1→2 都有行为变化，
+#   只写 >= 会让"同一份代码在不同机器上给出不同数字"。这里给出验证过的
+#   精确版本（见 requirements.lock.txt）与 Python 版本声明。
+# Python: 3.13（已在 3.13.14 上验证；3.12 亦可，<3.10 不支持）
+
+akshare>=1.16,<2.0
+pandas>=2.2,<4.0
+numpy>=1.26,<3.0
+scipy>=1.11,<2.0
+scikit-learn>=1.4,<2.0
+matplotlib>=3.8,<4.0
+flask>=3.0,<4.0          # Web 界面（webapp/）
+flask-cors>=4.0,<7.0     # 允许跨域，便于前端单独部署
+requests>=2.31,<3.0
