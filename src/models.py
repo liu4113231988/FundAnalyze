@@ -779,7 +779,12 @@ def estimate_equity(fit_fn, X: np.ndarray, y: np.ndarray, cols: List[str],
 
     def _r2_of(f):
         wv = f.weights.reindex(cols).fillna(0.0).values
-        return _score(X @ wv, y)[0]
+        v = _score(X @ wv, y)[0]
+        # ★ P0-05 的连带修复：R² 不再被截到 0 之后，它会是 NaN（目标无变异）
+        #   或 −inf。若不归一成一个**有限**的极小值，`r2 > best_r2` 对 NaN
+        #   恒为 False，于是所有候选都选不中 → 返回 (None, None)，
+        #   自适应仓位（默认开启）会拿到 None 并一路污染下去。
+        return -1e9 if not np.isfinite(v) else float(v)
 
     # ---- 阶段一：beta 不动点给初值（2 次拟合）
     E = float(np.clip(C.RBSA.get("equity_ratio", 0.9), lo, hi))
@@ -816,6 +821,8 @@ def estimate_equity(fit_fn, X: np.ndarray, y: np.ndarray, cols: List[str],
             r2 = _r2_of(fr)
         if r2 > best_r2:
             best_E, best_fr, best_r2 = Ec, fr, r2
+    if best_E is None:                       # 兜底：至少退回阶段一的 beta 不动点
+        return E, fr
     return best_E, best_fr
 
 

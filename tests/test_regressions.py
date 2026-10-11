@@ -279,11 +279,29 @@ def r9():
     chk(int(df3["拒绝原假设"].sum()) >= 1, "混合 p 值时 BH 至少保留最显著的一项")
 
 
+# ============================================================ R10 选参不塌
+def r10():
+    print("\nR10 · R² 变为 NaN 后，自适应仓位选参不得塌成 None")
+    from src.models import estimate_equity, fit_window
+    rng = np.random.default_rng(11)
+    n, k = 300, 4
+    cols = [f"a{i}" for i in range(k)]
+    X = rng.normal(0, 0.01, (n, k))
+    y = np.zeros(n)                      # 常数目标窗口（如长期停牌）→ R² 未定义
+    E, fr = estimate_equity(
+        lambda EE: fit_window("enet_slsqp", X, y, cols, equity_ratio=EE),
+        X, y, cols, bounds=(0.2, 1.0), method="grid")
+    chk(E is not None and np.isfinite(float(E)),
+        f"常数目标窗口下仍返回有限仓位 E={E}（修复前是 None）")
+    chk(fr is not None and np.all(np.isfinite(fr.weights.values)),
+        "仍返回可用的 FitResult（权重全为有限值）")
+
+
 def main():
     print("=" * 78)
     print("本轮 TODO 修复 · 行为回归")
     print("=" * 78)
-    for fn in (r1, r2, r3, r4, r5, r6, r7, r8, r9):
+    for fn in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10):
         try:
             fn()
         except Exception as e:                                # noqa: BLE001
