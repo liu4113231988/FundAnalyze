@@ -11,15 +11,31 @@
 <!-- ================= 顶栏 ================= -->
 <header class="topbar">
   <div class="brand">
-    <span class="logo">◈</span>
-    <div>
-      <h1>Fund Lens</h1>
-      <p>主动基金 · 指数穿透 · 多模型机器学习拟合</p>
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+        <circle cx="12" cy="12" r="7.4" stroke="#fff" stroke-width="1.7"
+          opacity=".95"/>
+        <path d="M12 4.9 19.1 12 12 19.1 4.9 12Z" stroke="#fff"
+          stroke-width="1.5" opacity=".5" stroke-linejoin="round"/>
+        <circle cx="12" cy="12" r="1.9" fill="#fff" opacity=".92"/>
+      </svg>
+    </span>
+    <div class="brand-txt">
+      <h1><b>Fund</b><i>Lens</i></h1>
+      <p class="brand-tags">
+        <span>主动基金</span><span>指数穿透</span><span>多模型拟合</span>
+      </p>
     </div>
   </div>
   <form class="search" id="searchForm" autocomplete="off">
     <input id="codeInput" placeholder="输入 6 位基金代码，如 110022" maxlength="6" />
-    <button type="submit" id="runBtn">开始分析</button>
+    <button type="submit" id="runBtn" class="btn primary">
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
+        aria-hidden="true"><path d="M2.6 8h9.2M8.4 4.2 12.2 8l-3.8 3.8"
+        stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+        stroke-linejoin="round"/></svg>
+      开始分析
+    </button>
     <select id="presetSel" title="示例基金">
       <option value="">— 示例 —</option>
     </select>
@@ -298,7 +314,21 @@
 <!-- ================= 空状态 ================= -->
 <div class="empty" id="empty">
   <div class="empty-in">
-    <div class="empty-icon">◈</div>
+    <div class="empty-icon">
+      <svg viewBox="0 0 24 24" width="64" height="64" fill="none"
+        aria-hidden="true">
+        <circle cx="12" cy="12" r="8.4" stroke="url(#eg)" stroke-width="1.25"/>
+        <path d="M12 3.6 20.4 12 12 20.4 3.6 12Z" stroke="url(#eg)"
+          stroke-width="1.1" stroke-linejoin="round"/>
+        <circle cx="12" cy="12" r="2.2" fill="url(#eg)"/>
+        <defs>
+          <linearGradient id="eg" x1="0" y1="0" x2="24" y2="24">
+            <stop offset="0" stop-color="#4a9eff"/>
+            <stop offset="1" stop-color="#7c5cff"/>
+          </linearGradient>
+        </defs>
+      </svg>
+    </div>
     <h2>输入基金代码开始</h2>
     <p>系统会抓取该基金的复权净值与 47 个候选指数，做 11 种机器学习方法的滚动样本外拟合，
        然后告诉你：它到底暴露在哪些风格上、哪个模型拟合最好、风格有没有漂移。</p>
