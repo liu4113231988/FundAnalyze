@@ -62,7 +62,8 @@ def ic_term_structure(sig: pd.DataFrame, nav: pd.Series,
 
 # ====================================================================== E2
 def channel_ablation(sig: pd.DataFrame, nav: pd.Series,
-                     cfg: Optional[dict] = None) -> pd.DataFrame:
+                     cfg: Optional[dict] = None,
+                     syn_nav: Optional[pd.Series] = None) -> pd.DataFrame:
     """各通道单独回测（含恒定仓位对照）。"""
     from .backtest import run_backtest
 
@@ -74,6 +75,10 @@ def channel_ablation(sig: pd.DataFrame, nav: pd.Series,
             # 剔除偏离通道后，按原 0.50:0.15 的相对比例重新归一
             0.77 * sig["trend_score"].fillna(0) + 0.23 * sig["val_score"].fillna(0)),
     }
+    # 波动率目标：风险归一化，不需要信号，适合放在消融表里对照
+    if syn_nav is not None:
+        vt = SignalEngine().vol_target_channel(syn_nav)
+        variants["波动率目标"] = vt["vol_target_pos"].reindex(nav.index).ffill().fillna(1.0)
     bt = run_backtest(nav, sig, cfg=cfg, variants=variants)
     m = bt["metrics"].copy()
     # ★ 每个方案减自己的恒定仓位对照（平均仓位一致才可比）。
@@ -114,11 +119,14 @@ def param_sensitivity(nav: pd.Series, syn_nav: pd.Series, weights: pd.DataFrame,
             bt = run_backtest(nav, sig, cfg=base_cfg)
             m = bt["metrics"]
             ctrl = bt["control_name"]
+            # 同上：超额夏普取自超额序列的 IR，不能用两个夏普相减
+            ca = bt["timing_contrib_all"].get("择时策略(融合)", {})
             rows.append({
                 "趋势窗口": slope_w, "趋势权重": wt, "kappa": kappa,
                 "策略夏普": m.loc["择时策略(融合)", "夏普"],
                 "对照夏普": m.loc[ctrl, "夏普"],
-                "超额夏普": m.loc["择时策略(融合)", "夏普"] - m.loc[ctrl, "夏普"],
+                "超额夏普": ca.get("夏普", np.nan),
+                "超额年化": ca.get("年化收益", np.nan),
                 "策略年化": m.loc["择时策略(融合)", "年化收益"],
                 "对照年化": m.loc[ctrl, "年化收益"],
                 "RankIC": bt["ic"],
@@ -166,17 +174,23 @@ def lowfreq_grid(nav: pd.Series, syn_nav: pd.Series, weights: pd.DataFrame,
                               main_name="低频再平衡")
             m = bt["metrics"]
             ctrl = bt["control_name"]
+            # ★ 超额夏普必须由 run_backtest 在**超额日序列**上算（信息比率口径），
+            #   不能用 metrics 表里两个几何夏普相减 —— 夏普不可加。
+            #   旧写法在同一份数据上给出 100% 为正，正确口径下只有 9/14。
+            ca = bt["timing_contrib_all"].get("低频再平衡", {})
+            avg_pos = float(sampled.reindex(nav.index).ffill()
+                            .loc[bt["window_start"]:bt["window_end"]].mean())
             rows.append({
                 "信号窗口": win, "再平衡周期": R,
                 "策略年化": m.loc["低频再平衡", "年化收益"],
                 "对照年化": m.loc[ctrl, "年化收益"],
                 "策略夏普": m.loc["低频再平衡", "夏普"],
                 "对照夏普": m.loc[ctrl, "夏普"],
-                "超额夏普": m.loc["低频再平衡", "夏普"] - m.loc[ctrl, "夏普"],
+                "超额夏普": ca.get("夏普", np.nan),
+                "超额年化": ca.get("年化收益", np.nan),
                 "策略回撤": m.loc["低频再平衡", "最大回撤"],
                 "对照回撤": m.loc[ctrl, "最大回撤"],
-                "平均仓位": float(sampled.reindex(nav.index).ffill()
-                                  .loc[bt["window_start"]:bt["window_end"]].mean()),
+                "平均仓位": avg_pos,
                 "对照组": ctrl,
             })
     return pd.DataFrame(rows)

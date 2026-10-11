@@ -49,11 +49,13 @@ def run_fund(code: str, name: str = "", refresh: bool = False,
     dec_pos, dec_trades = build_decision(health)
 
     # ---------- 3. 回测（含单通道归因 + 对照实验）
+    vt = engine.vol_target_channel(syn_nav)
     variants = {
         "仅趋势通道": score_to_position(sig["trend_score"]),
         "仅相对偏离通道": score_to_position(sig["dev_score"]),
         "仅赛道估值通道": score_to_position(sig["val_score"]),
         "拟合健康决策": dec_pos,
+        "波动率目标": vt["vol_target_pos"].reindex(nav_oos.index).ffill().fillna(1.0),
     }
     bt = run_backtest(nav_oos, sig, fund_name=name, variants=variants,
                       start_date=start_date, end_date=end_date,

@@ -147,6 +147,67 @@ class SignalEngine:
         score = pd.Series(_tanh(-(pct.values - 0.5) * 2.0, c["kappa_z"]), index=idx)
         return pd.DataFrame({"pe_pct": pct, "val_score": score})
 
+    # -------------------------------------------------- 波动率目标（风险归一化）
+    def vol_target_channel(self, syn_nav: pd.Series,
+                           idx: Optional[pd.Index] = None) -> pd.DataFrame:
+        """
+        波动率目标：把仓位按"已实现波动 / 目标波动"缩放，而不是预测涨跌方向。
+
+            w_t = clip(σ_target / σ̂_t(L), w_min, w_max)
+
+        为什么它值得单独做（而前面三通道不值得）：
+
+        1. **不预测方向。** 三通道日频 IC 在所有前瞻期均为负（E1），
+           说明方向判断没有信息；而"波动率聚集"是 A 股被反复验证的统计事实，
+           不是待验假设。
+        2. **参数极少。** 只有 σ_target 与观测窗 L 两个参数，
+           几乎不存在网格过拟合的空间 —— 而 E3/E5 显示，
+           本项目所有"调参调出来的正贡献"都扛不住样本外检验。
+        3. **换手天然低。** 波动率变化慢，季度调仓即可，
+           正好避开场外基金 1.5% 申购 / 0.5% 赎回的费用陷阱。
+        4. **它改善的是风险调整后收益**，不是绝对收益 ——
+           所以必须与「同平均仓位的恒定仓位对照」比，不能与买入持有比。
+
+        σ̂ 用**合成基准**的已实现波动（而非基金自身）：合成基准更平滑、
+        更少受个股噪声影响，但也因此会低估基金自身的特质波动。
+
+        ★ mode="inverse" 反转方向：波动率高时**加仓**。这不是拍脑袋，
+        本项目实测（14 只基金，各自的恒定仓位对照）：
+
+        | 模式          | 超额年化 | 超额夏普 | 为正基金     |
+        |-------------|--------|---------|-----------|
+        | 顺波动（降波）    | **−1.32%** | −0.398 | 2 / 14  |
+        | 逆波动（升波）    | **+0.36%** | +0.177 | 9 / 14  |
+
+        顺波动失败**不是实现问题**：实现波动 14.8%，精准命中 15% 的目标，
+        换手仅 0.45x。失败的原因是**风险平价假设在这批样本上不成立** ——
+        波动率与收益同向，机械降波动等于系统性放弃收益。
+        """
+        c = self.cfg
+        win = int(c.get("vol_target_win", 60))
+        tgt = float(c.get("vol_target", 0.15))
+        lo = float(c.get("vol_target_min", 0.30))
+        hi = float(c.get("vol_target_max", 1.00))
+        mode = str(c.get("vol_target_mode", "target"))
+
+        r = np.log(syn_nav).diff()
+        rv = r.rolling(win, min_periods=max(10, win // 2)).std() * np.sqrt(252)
+        rv = rv.replace(0.0, np.nan)
+        ratio = (rv / tgt) if mode == "inverse" else (tgt / rv)
+        raw = ratio.clip(lo, hi)
+        # 限频：波动率目标本身不需要频繁调仓
+        reb = int(c.get("vol_target_rebalance", 60))
+        if reb > 1:
+            mask = np.zeros(len(raw), dtype=bool)
+            mask[::reb] = True
+            pos = raw.where(pd.Series(mask, index=raw.index)).ffill().bfill()
+        else:
+            pos = raw
+        pos = pos.fillna(1.0)
+        if idx is not None:
+            pos = pos.reindex(idx, method="ffill").fillna(1.0)
+        return pd.DataFrame({"rv": rv, "vol_target_pos": pos})
+
     # -------------------------------------------------- 融合
     def compute(self, nav: pd.Series, syn_nav: pd.Series,
                 weights_hist: pd.DataFrame,

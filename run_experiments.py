@@ -36,7 +36,7 @@ def main():
         ics.append(t)
 
         # E2
-        a = channel_ablation(sig, nav)
+        a = channel_ablation(sig, nav, syn_nav=res["syn_nav"])
         a.insert(0, "基金", res["name"])
         abl.append(a)
 

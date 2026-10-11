@@ -219,12 +219,37 @@ def run_backtest(nav: pd.Series, sig: pd.DataFrame, cfg: Optional[dict] = None,
     win_short = float((fwd_oos[sm] < 0).mean()) if sm.any() else np.nan
 
     # ------------------------------ 择时净贡献（每个方案 − 它自己的恒定仓位对照）
+    # ★ 夏普与年化收益都**不可加**，所以不能拿 metrics 表里的两行相减：
+    #   perf_metrics 的年化是几何年化 (∏(1+r))^(252/n)−1，而几何年化之差
+    #   ≠ 差值的年化。实测同一份数据，两种口径给出的"为正基金数"
+    #   从 14/14 变成 9/14 —— 足以翻转结论。
+    # 正确口径是直接在**超额日收益序列**上算（信息比率 IR）：
+    #   超额年化 = mean(r_v − r_c) × 252
+    #   超额夏普 = 超额年化 / std(r_v − r_c) × √252
+    # ★ 分子**不扣无风险利率**：超额已经是"相对某个基准"的收益，
+    #   再扣一次 rf 会把"零超额"算成负值，系统性拉负全部结果
+    #   （实测 14 只基金的平均超额夏普从 −0.19 掉到 −0.88，纯属口径错误）。
     def _contrib(vname: str) -> dict:
         cn = controls.get(vname)
         if cn is None or vname not in metrics.index or cn not in metrics.index:
             return {}
         out = {}
-        for m in ("年化收益", "夏普", "最大回撤", "Calmar"):
+        try:
+            ex = (series[vname] - series[cn]).dropna()
+            ann_ex = float(ex.mean() * 252)
+            vol_ex = float(ex.std(ddof=1) * np.sqrt(252))
+            out["年化收益"] = ann_ex
+            if vol_ex > 1e-9:
+                out["夏普"] = ann_ex / vol_ex
+            else:
+                # 超额恒为 0（方案 ≡ 对照）时 IR 无定义，记 0 而不是 NaN，
+                # 否则"满仓方案 vs 恒定仓位(100%)"这种天然为 0 的情形
+                # 会在表格里显示成空值，看起来像计算失败。
+                out["夏普"] = 0.0 if abs(ann_ex) < 1e-9 else float("nan")
+        except (KeyError, TypeError, ValueError, IndexError):
+            out["年化收益"] = out["夏普"] = float("nan")
+        # 回撤不可加（无"超额回撤"的自然定义），故只给描述性的差值
+        for m in ("最大回撤", "Calmar"):
             try:
                 out[m] = float(metrics.loc[vname, m] - metrics.loc[cn, m])
             except (KeyError, TypeError, ValueError):

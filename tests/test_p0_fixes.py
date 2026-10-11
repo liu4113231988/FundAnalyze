@@ -29,6 +29,8 @@ from src import config as C
 from src.backtest import run_backtest
 from src.signal import SignalEngine, build_decision, health_stats
 
+C_RF = C.BACKTEST["cash_rate"]
+
 FAILS = []
 
 
@@ -81,6 +83,25 @@ def t1():
     chk(set(bt["timing_contrib"]) == {"年化收益", "夏普", "最大回撤", "Calmar"},
         "timing_contrib 向后兼容（仍是主策略的平铺字典）")
     chk(bt["control_name"] == ctrl_main, "control_name 向后兼容 = 主策略对照")
+
+    # ★ 夏普不可加：净贡献必须由「超额日序列」算（信息比率式），
+    #    不能拿 metrics 表里两个几何年化夏普相减。
+    # 用「满仓 vs 等仓位对照」构造一个满仓且天天调仓的例子：
+    # 若用相减口径，得到的差值与超额序列的真实 IR 完全不同。
+    sig3 = pd.DataFrame({"position_final": pd.Series(0.5 + 0.45 * np.sin(
+        np.arange(len(idx)) / 40.0), index=idx), "score": pd.Series(0.1, index=idx)})
+    bt3 = run_backtest(nav, sig3, main_name="满仓调仓")
+    m3 = bt3["metrics"]
+    cn3 = bt3["control_name"]
+    naive = float(m3.loc["满仓调仓", "夏普"] - m3.loc[cn3, "夏普"])
+    proper = bt3["timing_contrib"]["夏普"]
+    ex = (bt3["series"]["满仓调仓"] - bt3["series"][cn3])
+    ir = float(ex.mean() * 252) / float(ex.std(ddof=1) * np.sqrt(252))
+    chk(abs(proper - ir) < 1e-9,
+        f"净贡献夏普 == 超额序列 IR（{proper:.4f} vs {ir:.4f}，IR 不扣无风险利率）")
+    chk(abs(proper - naive) > 1e-6,
+        f"净贡献夏普 {proper:.4f} ≠ 两个几何夏普之差 {naive:.4f} "
+        "—— 口径确已切换，不能再退回相减")
 
 
 # ============================================================== T2 回测边界
