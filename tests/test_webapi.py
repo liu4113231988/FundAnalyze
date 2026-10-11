@@ -21,6 +21,7 @@ import json
 import pandas as pd
 from src.webapi import (analyze, refit_single, correlation_block,
                         nav_block, get_fund_name)
+from src import config as C
 from src import data as D
 from src.models import MODEL_ORDER
 
@@ -84,7 +85,15 @@ def main():
                 + ("" if ok else f"  extra={mm.get('extra')}"))
         ws = mm["latest_weights"]["sum"]
         if mm["interpretable"] and ok:
-            chk(abs(ws - 0.90) < 0.02, f"  └ 可解释权重和={ws:.3f} 应≈0.90")
+            # Σw = 逐窗口估计出的实际股票仓位（不再固定 0.90），
+            # 因此只能校验它落在合理区间、且与报告的 equity_used 自洽。
+            eq_used = (mm.get("extra") or {}).get("equity_used")
+            lo, hi = C.RBSA["equity_bounds"]
+            chk(lo - 1e-6 <= ws <= hi + 1e-6,
+                f"  └ 可解释权重和={ws:.3f} 落在 [{lo}, {hi}] 区间内")
+            if eq_used is not None:
+                chk(abs(ws - float(eq_used)) < 0.15,
+                    f"  └ 权重和 {ws:.3f} 与报告的估计仓位 {float(eq_used):.3f} 自洽")
 
     print("\n[rank]")
     rk = pd.DataFrame(res["rank"])

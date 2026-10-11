@@ -597,8 +597,8 @@ def analyze(code: str, models: Optional[List[str]] = None,
             params: Optional[dict] = None, refresh: bool = False,
             job_id: Optional[str] = None,
             max_rebal: Optional[int] = None,
-            auto_equity: bool = False) -> dict:
-    """完整分析流程。models 为空表示全部 9 个模型。"""
+            auto_equity: bool = True) -> dict:
+    """完整分析流程。models 为空表示全部 11 个模型。"""
     models = models or MODEL_ORDER
     models = [m for m in models if m in MODELS]
     t0 = time.time()
@@ -632,7 +632,7 @@ def analyze(code: str, models: Optional[List[str]] = None,
                     detail=f"({done}/{total}) 样本外R²="
                            f"{'—' if r2 is None or (isinstance(r2, float) and not math.isfinite(r2)) else f'{r2:.3f}'}")
 
-    zoo_cfg = {**C.RBSA, "auto_equity": True} if auto_equity else None
+    zoo_cfg = {**C.RBSA, "auto_equity": bool(auto_equity)}
     zoo = ModelZoo(zoo_cfg)
     reps = zoo.run(panel, models, params=params, max_rebal=max_rebal,
                    progress=on_progress if job_id else None)
@@ -714,14 +714,14 @@ def get_fund_name(code: str) -> str:
 def refit_single(code: str, model_key: str,
                  params: Optional[dict] = None,
                  max_rebal: Optional[int] = None,
-                 auto_equity: bool = False) -> dict:
+                 auto_equity: bool = True) -> dict:
     """
     只重跑一个模型（"重新学习"按钮）。
 
     数据走缓存，因此耗时 = 单模型滚动时间，远快于全量重算。
     """
     panel = D.load_panel(code, verbose=False)
-    zoo_cfg = {**C.RBSA, "auto_equity": True} if auto_equity else None
+    zoo_cfg = {**C.RBSA, "auto_equity": bool(auto_equity)}
     zoo = ModelZoo(zoo_cfg)
     rep = zoo.run(panel, [model_key], params={model_key: params or {}},
                   workers=1, max_rebal=max_rebal)[model_key]
@@ -787,10 +787,10 @@ def _backtest_payload(code: str, name: str, model_key: str, auto_equity: bool,
 
 
 def backtest_fund(code: str, model_key: str = "enet_slsqp",
-                  auto_equity: bool = False,
-                  start_date: Optional[str] = None,
-                  end_date: Optional[str] = None,
-                  cost_rate: Optional[float] = None,
+                  auto_equity: bool = True,
+                                  start_date: Optional[str] = None,
+                                  end_date: Optional[str] = None,
+                                  cost_rate: Optional[float] = None,
                   job_id: Optional[str] = None) -> dict:
     """
     拟合 → 健康度买卖决策 → 指定日期区间的回测。
@@ -813,7 +813,7 @@ def backtest_fund(code: str, model_key: str = "enet_slsqp",
             or _guess_name(code))
 
     prog(f"滚动拟合 {MODELS[model_key].name}", 0.25)
-    zoo_cfg = {**C.RBSA, "auto_equity": True} if auto_equity else None
+    zoo_cfg = {**C.RBSA, "auto_equity": bool(auto_equity)}
     zoo = ModelZoo(zoo_cfg)
     rep = zoo.run(panel, [model_key], workers=1,
                   max_rebal=C.RBSA["max_rebal"])[model_key]

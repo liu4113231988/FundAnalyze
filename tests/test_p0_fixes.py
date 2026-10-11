@@ -333,11 +333,82 @@ def t6():
         fp.unlink()
 
 
+# ============================================================== T7 仓位自适应
+def _low_equity_panel(n=1400, gamma=0.30, seed=17, k=12):
+    """
+    构造一只"实际股票仓位只有 gamma"的基金。
+
+    关键：y 的信号必须是**非负且集中的**持仓组合 Σ b_j·u_j（Σb=gamma），
+    而不是"k 个指数的等权平均"。后者会让 RBSA 在 Σw 约束下的解与信号
+    方向一致但尺度差 sqrt(k) 倍，从而自己造出尺度失真 ——
+    那样测的就不是"仓位失配"，而是数据构造的artifact。
+    """
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range("2016-01-04", periods=n, name="date")
+    X = rng.normal(0.0005, 0.012, (n, k))
+    b = np.zeros(k)
+    pick = rng.choice(k, size=3, replace=False)       # 集中持仓，符合真实基金
+    b[pick] = gamma * np.array([0.5, 0.3, 0.2])
+    y = X @ b + rng.normal(0, 0.001, n)
+    cols = [f"i{i}" for i in range(k)]
+    px = pd.concat([pd.DataFrame(100 * np.exp(X[:, j].cumsum()), index=idx,
+                                 columns=[cols[j]]) for j in range(k)], axis=1)
+    px["__FUND__"] = 100 * np.exp(y.cumsum())
+    return px
+
+
+def t7():
+    print("\nT7 · 仓位自适应：固定 Σw=0.9 对低仓位基金是灾难性的")
+    from src import config as C
+    from src.models import ModelZoo
+
+    for gamma in (0.30, 0.90):
+        px = _low_equity_panel(gamma=gamma)
+        assets = [c for c in px.columns if c != "__FUND__"]
+        R = np.log(px).diff().dropna()
+        dates = R.index
+        X, y = R[assets].values, R["__FUND__"].values
+        reb = ModelZoo._rebal_idx(len(dates), C.RBSA["window"],
+                                  C.RBSA["refit"], 30)
+        fixed = ModelZoo({**C.RBSA, "auto_equity": False})._run_one(
+            "enet_slsqp", X, y, assets, dates, reb, None)
+        auto = ModelZoo({**C.RBSA, "auto_equity": True})._run_one(
+            "enet_slsqp", X, y, assets, dates, reb, None)
+        rf, ra = fixed.fit_diag["r2"].median(), auto.fit_diag["r2"].median()
+        eq = auto.extra.get("equity_used", float("nan"))
+        tag = f"真实仓位 {gamma:.0%}"
+        if gamma < 0.5:
+            chk(rf < 0.5, f"{tag}：固定 Σw=0.9 的窗口 R² 仅 {rf:.3f}（确认失配）")
+            chk(ra > 0.78,
+                f"{tag}：自适应后 R² 恢复到 {ra:.3f}（估计仓位 {eq:.2f}）")
+            chk(abs(eq - gamma) < 0.10, f"{tag}：估计仓位 {eq:.2f} 接近真值")
+            chk(auto.oos_te < fixed.oos_te,
+                f"{tag}：年化 TE {fixed.oos_te:.1%} → {auto.oos_te:.1%}")
+        else:
+            chk(ra > 0.85, f"{tag}：自适应后 R² = {ra:.3f}（应仍然很高）")
+            chk(abs(eq - gamma) < 0.15, f"{tag}：估计仓位 {eq:.2f} 接近真值")
+
+    # ModelZoo(cfg) 传入的 equity_ratio 必须真的生效（曾经被静默忽略）
+    px = _low_equity_panel(gamma=0.9)
+    assets = [c for c in px.columns if c != "__FUND__"]
+    R = np.log(px).diff().dropna()
+    dates = R.index
+    X, y = R[assets].values, R["__FUND__"].values
+    reb = ModelZoo._rebal_idx(len(dates), C.RBSA["window"], C.RBSA["refit"], 30)
+    a = ModelZoo({**C.RBSA, "auto_equity": False, "equity_ratio": 0.90})._run_one(
+        "enet_slsqp", X, y, assets, dates, reb, None)
+    b = ModelZoo({**C.RBSA, "auto_equity": False, "equity_ratio": 0.30})._run_one(
+        "enet_slsqp", X, y, assets, dates, reb, None)
+    chk(abs(a.fit_diag["r2"].median() - b.fit_diag["r2"].median()) > 0.05,
+        f"ModelZoo(cfg) 的 equity_ratio 真正生效："
+        f"0.90→{a.fit_diag['r2'].median():.3f}  0.30→{b.fit_diag['r2'].median():.3f}")
+
+
 def main():
     print("=" * 78)
     print("P0 修复回归验证")
     print("=" * 78)
-    for fn in (t1, t2, t3, t4, t5, t6):
+    for fn in (t1, t2, t3, t4, t5, t6, t7):
         try:
             fn()
         except Exception as e:                                # noqa: BLE001

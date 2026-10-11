@@ -18,7 +18,8 @@ for _d in (DATA_DIR, FIG_DIR, RES_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # Web 结果缓存版本：修改拟合/回测口径后必须 +1，旧版缓存文件会被自动清理
-CACHE_VERSION = 2
+# 3 = 仓位约束改为自适应（auto_equity 默认 True），拟合口径整体变化
+CACHE_VERSION = 3
 
 # 数据缓存版本：修改 align_prices / 覆盖率阈值 / 候选池等取数口径后 +1，
 # 旧版 output/data/panel_*.csv 会被自动判为过期并重新抓取。
@@ -125,10 +126,21 @@ RBSA = dict(
     alpha_grid=(1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1),  # 由时序CV选
     min_weight=0.01,     # 权重低于此值视为噪声，归零后重新归一
     max_assets=8,        # 稀疏支撑集上限
-    equity_ratio=0.90,   # 主动权益基金假设股票仓位（sum(w) 的目标）
+    equity_ratio=0.90,   # 目标股票仓位（auto_equity=False 时直接作为 Σw 的目标）
     max_rebal=60,        # 滚动重估点上限（超出则均匀抽稀，控制 Web 首屏耗时）
-    auto_equity=False,   # 按窗口内数据估计实际仓位并替换固定 0.90（无前瞻）
-    equity_bounds=(0.50, 1.0),  # 自适应仓位的裁剪区间，防止异常窗口取极端值
+    # ★ 默认开启自适应仓位。固定 0.9 对混合型基金是灾难性的：
+    #   实测 163402 / 000001 / 519005 在 Σw=0.9 下窗口内 R² 中位数为 0.000，
+    #   而把 Σw 降到各自的实际仓位（0.25~0.30）后 R² 恢复到 0.74~0.85。
+    #   根因是强制 Σw=0.9 会让合成基准的波动远超基金本身，残差里混进纯粹的尺度误差。
+    auto_equity=True,
+    # "local" = beta 不动点给初值 + 邻域细搜并最大化窗口内 R²（默认，4 次拟合/窗口）
+    # "beta"  = 只用 beta 不动点（2 次拟合，最快，但估计系统性高估约 25%）
+    # "grid"  = equity_grid 全网格最大化 R²（8 次拟合，基准口径，用于复核）
+    equity_method="local",
+    equity_local_step=0.10,   # local 法的邻域半宽
+    equity_grid=(0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.95),
+    equity_bounds=(0.20, 1.00),  # 实际仓位的裁剪区间
+    equity_iters=2,      # 仅 beta 阶段使用：迭代次数
 )
 
 SIGNAL = dict(

@@ -668,23 +668,102 @@ def fit_window(model_key: str, X: np.ndarray, y: np.ndarray, cols: List[str],
     return _DISPATCH[model_key](X, y, cols, er, prm)
 
 
-def estimate_equity(X: np.ndarray, y: np.ndarray,
-                    bounds: tuple = (0.5, 1.0)) -> float:
+def estimate_equity(fit_fn, X: np.ndarray, y: np.ndarray, cols: List[str],
+                    bounds: tuple = (0.2, 1.0),
+                    grid=(0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.95),
+                    method: str = "grid"):
     """
-    估计基金在窗口内的实际股票仓位：非负最小二乘系数和 ≈ 总权益敞口。
+    估计基金在窗口内的实际股票仓位，返回 (仓位, 已按该仓位拟合好的结果)。
 
-    只用窗口内（t 时刻之前）数据，逐窗口调用不引入前瞻；
-    nnls 失败时退回配置默认仓位。
+    ★ R² 对 Σw 的目标值 E 极度敏感，且**每只基金的最优 E 完全不同**（实测窗口 R² 中位数）：
+
+    | 基金        | E=0.9 | E=0.5 | E=0.3 | 最优 E |
+    |-----------|-------|-------|-------|--------|
+    | 兴全趋势    | 0.000 | 0.301 | 0.851 | 0.30 |
+    | 华夏成长    | 0.000 | 0.101 | 0.838 | 0.25 |
+    | 海富通股票  | 0.000 | 0.707 | 0.736 | 0.30 |
+    | 景顺长城新兴 | 0.600 | 0.908 | 0.784 | 0.50 |
+    | 汇添富蓝筹  | 0.664 | 0.888 | 0.747 | 0.50 |
+    | 易方达消费  | 0.929 | 0.748 | 0.521 | 0.90 |
+
+    固定 0.9 对混合型基金是灾难性的：R² 直接掉到 0，合成基准完全不能用。
+    根因不是"仓位假设"这么轻描淡写的一句，而是：合成收益 = E·u，
+    残差 = (γ−E)·u + ε，**尺度差 (γ−E) 会直接平方进 SSE**。
+    E 偏离真实仓位 0.6，残差里就混进 0.36·var(u) 的纯尺度误差。
+
+    两种估法（都只用窗口内数据，不引入前瞻）：
+
+    - ``method="grid"``（默认）：在 E 网格上**直接最大化窗口内 R²**。
+      R² 就是我们要优化的目标，没有代理误差。
+      代价是每窗口要拟合 len(grid) 次（默认 8 次，约慢 4 倍）。
+    - ``method="beta"``：隐含 beta 不动点，γ = β·E（β = cov(y,s)/var(s)）。
+      只需 2 次拟合，但 **γ 的估计会混入 alpha 与基准的协方差**：
+      持续跑赢且做反向选择的基金（如行业主题基金）会被系统性低估 ——
+      实测易方达消费行业被估成 0.65（实际约 0.9），窗口 R² 从 0.929 掉到 0.871。
+
+    实测（14 只基金，enet_slsqp，40 个重估点）：
+
+    | 口径          | R² 中位 | R²<0.5 只数 | 年化 TE 均值 | 耗时/只 |
+    |-------------|-------|-----------|------------|-------|
+    | 固定 0.9      | 0.769 | 4         | 9.88%      | 0.87s |
+    | beta 不动点   | 0.884 | 0         | 6.96%      | 1.61s |
+    | 局部细搜       | 0.890 | 0         | 6.90%      | 2.6s |
+    | 全网格最大 R²  | 0.891 | 0         | 6.88%      | 6.56s |
+
+    在真实数据上三者差别很小（0.884 vs 0.891），但在**已知真值的合成检验**上
+    （构造 y = Σb_j·u_j, Σb=γ, 噪声极低）差别很大：
+
+    | γ 真值 | beta 估计 | 全网格估计 |
+    |-------|----------|-----------|
+    | 0.30  | 0.382    | **0.300** |
+    | 0.60  | 0.703    | **0.600** |
+
+    beta 法**系统性高估约 25%**：γ = β·E 里的 β 用的是"当前 w 下的协方差比"，
+    而 w 受非负 + 稀疏约束，并不严格 ∝ 最优方向，协方差比因此有偏。
+    局部细搜（"local"，默认）以几乎不增加的耗时拿到全网格的精度。
     """
-    from scipy.optimize import nnls
-
-    try:
-        w, _ = nnls(X, y)
-        est = float(np.sum(w))
-    except Exception:                          # noqa: BLE001
-        est = C.RBSA["equity_ratio"]
     lo, hi = bounds
-    return float(np.clip(est, lo, hi))
+
+    def _r2_of(f):
+        wv = f.weights.reindex(cols).fillna(0.0).values
+        return _score(X @ wv, y)[0]
+
+    # ---- 阶段一：beta 不动点给初值（2 次拟合）
+    E = float(np.clip(C.RBSA.get("equity_ratio", 0.9), lo, hi))
+    fr = None
+    for _ in range(2):
+        fr = fit_fn(E)
+        wv = fr.weights.reindex(cols).fillna(0.0).values
+        v = float(np.var(X @ wv))
+        if not np.isfinite(v) or v <= 1e-18:
+            break
+        gamma = float(np.cov(y, X @ wv)[0, 1] / v) * E   # ★ 必须乘回 E：β = γ/E
+        E_new = float(np.clip(gamma, lo, hi))
+        if abs(E_new - E) < 0.03:
+            E = E_new
+            break
+        E = E_new
+
+    if method == "beta":
+        return E, fr
+
+    if method == "grid":
+        cands = [float(np.clip(g, lo, hi)) for g in grid]
+    else:                                        # "local"（默认）
+        step = float(C.RBSA.get("equity_local_step", 0.10))
+        cands = sorted({float(np.clip(E + d, lo, hi))
+                        for d in (-step, 0.0, step)})
+
+    best_E, best_fr, best_r2 = None, None, -np.inf
+    for Ec in cands:
+        if fr is not None and abs(Ec - E) < 1e-9:
+            r2 = _r2_of(fr)                      # 阶段一的结果直接复用
+        else:
+            fr = fit_fn(Ec)
+            r2 = _r2_of(fr)
+        if r2 > best_r2:
+            best_E, best_fr, best_r2 = Ec, fr, r2
+    return best_E, best_fr
 
 
 # ====================================================================== 进程池辅助
@@ -865,18 +944,32 @@ class ModelZoo:
         last_date = None
         spec = MODELS[key]
         auto_equity = bool(cfg.get("auto_equity", False))
+        bounds = tuple(cfg.get("equity_bounds", (0.2, 1.0)))
+        eq_start = float(cfg.get("equity_ratio", C.RBSA["equity_ratio"]))
 
         for k, i in enumerate(rebal_idx):
             lo, hi = i - cfg["window"], i
             Xw, yw = X_all[lo:hi], y_all[lo:hi]
             if len(yw) < cfg["min_obs"]:
                 continue
-            if auto_equity:
-                er = estimate_equity(Xw, yw, cfg.get("equity_bounds", (0.5, 1.0)))
+            if auto_equity and spec.interpretable:
+                # 只有可解释模型（Σw 有经济含义）才谈得上"实际仓位"；
+                # 黑箱模型的权重只是重要性排序，缩放它没有意义。
+                er, fr = estimate_equity(
+                    lambda E: fit_window(key, Xw, yw, assets, override,
+                                         equity_ratio=E),
+                    Xw, yw, assets, bounds=bounds,
+                    grid=tuple(cfg.get("equity_grid",
+                                       (0.20, 0.30, 0.40, 0.50,
+                                        0.60, 0.70, 0.80, 0.95))),
+                    method=str(cfg.get("equity_method", "grid")))
                 equities.append(er)
             else:
-                er = None
-            fr = fit_window(key, Xw, yw, assets, override, equity_ratio=er)
+                # ★ 之前这里是 None，导致 fit_window 回落到全局
+                # C.RBSA["equity_ratio"]，也就是 ModelZoo(cfg) 传入的
+                # equity_ratio **完全被忽略** —— 一个怎么改都不生效的配置项。
+                er = eq_start
+                fr = fit_window(key, Xw, yw, assets, override, equity_ratio=er)
             w_full = fr.weights.reindex(assets).fillna(0.0).values
 
             # 权重覆盖到下一个重估点：抽稀后相邻点间隔可能远大于 refit，

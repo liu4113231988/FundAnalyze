@@ -87,7 +87,7 @@
     <div class="model-picker" id="modelPicker">
       <div class="mp-list" id="mpList"></div>
       <label class="switch-inline" title="用窗口内数据估计基金实际仓位，替换固定 90% 约束。适合低仓位/对冲基金，不引入前瞻">
-        <input type="checkbox" id="autoEquity"> 仓位约束自适应（低仓位 / 对冲基金适用）
+        <input type="checkbox" id="autoEquity" checked> 仓位约束自适应（默认开启；低仓位 / 对冲基金尤其需要）
       </label>
     </div>
 
@@ -154,7 +154,7 @@
             border:1px solid var(--line2);background:var(--bg2);color:var(--fg2);font-size:12px"></select>
         </label>
         <label class="switch-inline" title="低仓位基金请勾选">
-          <input type="checkbox" id="btAuto"> 仓位自适应
+          <input type="checkbox" id="btAuto" checked> 仓位自适应
         </label>
         <input type="date" id="btStart" class="date-in">
         <span class="hint">至</span>
