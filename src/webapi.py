@@ -33,6 +33,7 @@ warnings.filterwarnings("ignore")
 from . import config as C
 from . import data as D
 from .backtest import run_backtest, score_to_position
+from .trend_state import trend_payload
 from .models import (MODELS, MODEL_ORDER, ModelReport, ModelZoo,
                       model_catalog)
 from .signal import SignalEngine, build_decision, health_stats
@@ -375,6 +376,10 @@ def model_payload(rep: ModelReport, nav_oos: pd.Series,
 
     step = max(1, len(syn_nav) // max_points)
     idx = syn_nav.index[::step]
+    # 趋势状态：必须在**日频**序列上判定，再把结果按绘图下标采样下发。
+    # 若直接在降采样序列上判"最近 10 日"，实际是"10 个采样点 ≈ 40 个交易日"，
+    # 语义会完全失真（step 实测约 4）。
+    trend = trend_payload(syn_nav, idx)
 
     return {
         "key": rep.key, "name": rep.name, "family": rep.family,
@@ -401,6 +406,8 @@ def model_payload(rep: ModelReport, nav_oos: pd.Series,
             "dates": _dates(idx),
             "fund": [_jnum(v, 5) for v in fund_line.reindex(idx)],
             "synth": [_jnum(v, 5) for v in syn_line.reindex(idx)],
+            # 趋势状态按绘图下标一一对应（长度 = len(dates)）
+            "trend": trend,
         },
         "residual": {
             "dates": _dates(syn.index[::step]),

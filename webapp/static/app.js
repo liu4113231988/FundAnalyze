@@ -9,6 +9,7 @@ const S = {
   best: null,         // 当前"最佳"模型 key
   params: {},         // 每个模型的超参覆盖
   rollWin: 120,
+  lookback: 10,       // 趋势状态的回看窗口（交易日，1~20）
   charts: {},         // echarts 实例缓存
 };
 
@@ -294,6 +295,33 @@ const METRICS = {
     read: '漂移剧烈说明<b>风格不稳定</b>——'
       + '今天消费明天科技，那么“风格穿透”的结论本身就靠不住了。'
       + '注意 20 日重估的基金天生漂移更大，所以同样必须用相对口径。',
+  },
+
+  // ---------------- 趋势状态（描述性） ----------------
+  trend_state: {
+    what: '按「高低点结构」给合成基准贴的形态标签，'
+      + '只有五档：上升、下降、震荡、拐头向上、拐头向下。',
+    how: '取最近 N 个交易日为一组、紧邻的再前 N 日为一组，比较两组的极值：'
+      + '<b>高点抬高且低点抬高 → 上升</b>；<b>高点降低且低点降低 → 下降</b>；'
+      + '其余 → 震荡。拐头另需四个条件同时成立（见「回看窗口」）。',
+    read: '<b>这是形态描述，不是买卖建议、不含任何持仓含义。</b>'
+      + '本项目已用 14 只基金做样本外检验证明：日频方向信号无法超越恒定仓位对照'
+      + '（RankIC 均值 −0.073，13/14 只为负）。'
+      + '它唯一的用途是让你"用一句话说出这段走势长什么样"。'
+      + '实测该判据并非纯噪声：真实序列的方向性标签占比比打乱时间顺序后高 '
+      + '<b>25~28 个百分点</b>，说明它确实抓到了短期结构。',
+  },
+  trend_lookback: {
+    what: '回看窗口 N：判定时用最近多少个交易日的数据。'
+      + '本页可选 1 / 2 / 3 / 5 / 10 / 20 个交易日。',
+    how: 'N 决定两组窗口各取多少天。N=1 时只比较今昨两日收盘；'
+      + 'N=20 时比较最近 20 日与之前 20 日的高低点。',
+    read: '<b>N 越大，状态越稳定，但也越迟钝。</b>'
+      + '实测（4 只基金合成基准，2368 个交易日）体制态的平均段长：'
+      + '<b>N=5 → 3.4 天，N=10 → 5.3 天，N=20 → 7.4 天</b>。'
+      + 'N=1 会退化成"单日涨跌"——判不出震荡，也判不出拐头。'
+      + '默认 10 日（约两个交易周），是能读出形态与灵敏度之间的折中。'
+      + '状态卡里会实时显示当前 N 下的历史段长，可直接核对它是否可读。',
   },
 
   // ---------------- 稳健性统计 ----------------
@@ -814,6 +842,7 @@ function renderSelected() {
     noteEl.hidden = false;
   } else { noteEl.hidden = true; }
 
+  renderTrendPanel();
   drawCurve(m); drawResid(m); drawWHist(m); drawWeights(m);
   renderTuner();
 }
@@ -835,8 +864,155 @@ const AX = {
 const PAL = ['#4a9eff', '#7c5cff', '#12b886', '#f0a020', '#ef4a4a',
   '#00c2d1', '#e857a6', '#8bc34a'];
 
+// ============================================================ 趋势状态（描述性）
+// ★ 定位：这是**形态描述**，不是买卖建议、不产出任何持仓含义。
+//   本项目已用 14 只基金做样本外检验证明：日频方向信号无法超越「恒定仓位对照」
+//   （RankIC 均值 −0.073，13/14 只为负，见 docs/研究方案.md E0~E4）。
+//   这里只回答"合成基准现在长什么样"，不回答"该不该买"。
+//
+// ── 判定逻辑在 src/trend_state.py，本文件只负责画 ────────────────────
+//   为什么不放在前端算：后端下发的曲线是**降采样**的（step = len//400，
+//   实测约 4 天一个点）。在前端算"最近 10 日"实际是"10 个采样点 ≈ 40 个
+//   交易日"，语义完全失真；而要前端拿到日频序列，curve 会从 67KB 涨到
+//   ~335KB。改由后端在日频序列上算好、把状态压成每回看窗口一条字符串下发，
+//   6 档 × 474 点 ≈ 2.8KB/模型 —— 便宜约 20 倍，且只有一份实现。
+//   判据细节（高低点结构 + 拐头的四个附加条件）见该模块的 docstring。
+//
+// 编码：U 上升 / D 下降 / R 震荡 / u 拐头向上 / d 拐头向下 / . 样本不足
+const TREND = {
+  u: { label: '拐头向上', color: '#ff9a3c' },
+  U: { label: '上升趋势', color: '#ef4a4a' },
+  R: { label: '震荡',     color: '#8b98ab' },
+  D: { label: '下降趋势', color: '#12b886' },
+  d: { label: '拐头向下', color: '#2f9e8f' },
+};
+// 可选回看窗口。1~5 是"几天涨跌"，10/20 才勉强能读出短期趋势形态。
+// 实测（4 只基金合成基准，2368 日）体制态（上升/下降/震荡）的平均段长：
+//   N=5 → 3.4 天，N=10 → 5.3 天，N=20 → 7.4 天（p90 分别 8 / 13 / 19 天）
+// 默认 10：均值约 5 个交易日，是一个交易周的量级。
+const TREND_LEVELS = [1, 2, 3, 5, 10, 20];
+const TREND_DEFAULT_N = 10;
+const TURN_CODES = ['u', 'd'];
+
+/**
+ * 把后端下发的状态串压成连续段（画色带用）。
+ * 编码：U 上升 / D 下降 / R 震荡 / u 拐头向上 / d 拐头向下 / . 样本不足
+ */
+function trendRuns(dates, codes) {
+  const runs = [];
+  let s = -1, cur = null;
+  for (let i = 0; i < codes.length; i++) {
+    const c = codes[i];
+    if (!c || c === '.') {
+      if (s >= 0) runs.push([s, i - 1, cur]);
+      s = -1; cur = null; continue;
+    }
+    if (s < 0) { s = i; cur = c; }
+    else if (c !== cur) { runs.push([s, i - 1, cur]); s = i; cur = c; }
+  }
+  if (s >= 0) runs.push([s, codes.length - 1, cur]);
+  return runs;
+}
+
+/** 回看窗口选择器 + 当前状态卡（挂在拟合曲线面板上）。 */
+function renderTrendPanel() {
+  const m = S.result && S.result.models[S.sel];
+  if (!m || !m.curve) return;
+
+  // ---- 选择器
+  const seg = $('trendSeg');
+  if (seg) {
+    seg.innerHTML = TREND_LEVELS.map(n =>
+      `<button type="button" data-n="${n}" class="${n === S.lookback ? 'on' : ''}">${n}</button>`
+    ).join('');
+    [...seg.children].forEach(b => {
+      b.onclick = () => {
+        const v = Number(b.dataset.n);
+        if (v === S.lookback) return;
+        S.lookback = v;
+        renderTrendPanel();
+        drawCurve(S.result.models[S.sel]);   // 色带要跟着重画
+      };
+    });
+  }
+
+  // ---- 状态（数据来自后端 src/trend_state.py，在日频序列上算好）
+  const d = m.curve;
+  const N = S.lookback;
+  const tr = d.trend || {};
+  const at = (tr.last || {})[String(N)];
+  const hist = (tr.stats || {})[String(N)];
+  const card = $('trendCard');
+  if (!card) return;
+  if (!at || !hist) {
+    card.innerHTML = `<div class="tc-empty">样本不足 ${2 * N} 个交易日，无法判定。</div>`;
+    return;
+  }
+  const st = TREND[at.state] || TREND.R;
+  const posTxt = `${Math.round(at.pos * 100)}%`;
+  const thin = N <= 2;
+  card.innerHTML = `
+    <div class="tc-head">
+      <span class="tc-state" style="color:${st.color}">
+        <i style="background:${st.color}"></i>${st.label}</span>
+      <span class="tc-sub">合成基准 · 回看 ${N} 个交易日 ·
+        本组 ${at.win_start} ~ ${at.win_end}，前一组 ${at.prior_start} ~ ${at.prior_end}</span>
+    </div>
+    <div class="tc-grid">
+      <div><i>本组高点</i><b>${at.hr.toFixed(4)}</b>
+        <em>出现在第 ${at.arg_h}/${N} 日</em></div>
+      <div><i>本组低点</i><b>${at.lr.toFixed(4)}</b>
+        <em>出现在第 ${at.arg_l}/${N} 日</em></div>
+      <div><i>前一组高点</i><b>${at.hp.toFixed(4)}</b></div>
+      <div><i>前一组低点</i><b>${at.lp.toFixed(4)}</b></div>
+      <div><i>当前在区间位置</i><b>${posTxt}</b><em>0% = 区间最低</em></div>
+    </div>
+    <div class="tc-hist">
+      <b>该回看窗口的历史可靠性（按日频全样本统计）：</b>
+      体制态 ${hist.regime_runs} 段（中位 ${hist.regime_median} 天 /
+      均值 ${hist.regime_mean} 天 / p90 ${hist.regime_p90} 天）
+      · 拐头 ${hist.turn_runs} 次
+      ${hist.turn_every ? `（平均每 ${hist.turn_every} 个交易日一次）` : ''}
+      ${hist.regime_mean < 3 ? '　⚠ 段长过短：这个窗口下状态接近每天翻转，读不出趋势'
+        : ''}
+    </div>
+    <div class="tc-legend">
+      ${['U', 'D', 'R'].map(k =>
+        `<span><i class="bar" style="background:${TREND[k].color}"></i>${TREND[k].label}</span>`
+      ).join('')}
+      ${TURN_CODES.map(k =>
+        `<span><i class="dot" style="background:${TREND[k].color}"></i>${TREND[k].label}</span>`
+      ).join('')}
+      <span class="tc-lb">色带 = 状态区间　圆点 = 拐头（瞬时标记，仅 1 天）　
+        拖动图表下方滑块放大后色带才可读（全区间看是一片细条纹）</span>
+    </div>
+    ${thin ? `<div class="tc-warn">回看窗口 ${N} 日只能比较单日/两日的涨跌：
+      出不了「震荡」，也出不了「拐头」。要读形态请选 5 日以上。</div>` : ''}`;
+}
+
 function drawCurve(m) {
   const d = m.curve;
+  const codes = ((d.trend || {}).codes || {})[String(S.lookback)] || '';
+  // 体制态（上升/下降/震荡）→ 竖向色带；拐头是 1 天的瞬时标记，
+  // 画成色带宽度不足 1 像素、根本看不见，所以改为在曲线上打点。
+  const runs = trendRuns(d.dates, codes)
+    .filter(([, , c]) => TURN_CODES.indexOf(c) < 0)
+    .map(([a, b, c]) => ([
+      { xAxis: d.dates[a], itemStyle: { color: TREND[c].color } },
+      { xAxis: d.dates[b] },
+    ]));
+  const turns = [];
+  for (let i = 0; i < codes.length; i++) {
+    const c = codes[i];
+    if (TURN_CODES.indexOf(c) >= 0) {
+      turns.push({
+        name: TREND[c].label,
+        coord: [d.dates[i], d.synth[i]],
+        value: TREND[c].label,
+        itemStyle: { color: TREND[c].color },
+      });
+    }
+  }
   chart('chartCurve', {
     grid: { left: 52, right: 18, top: 18, bottom: 34 },
     tooltip: { trigger: 'axis', backgroundColor: '#1b2431', borderColor: '#2f3b4d',
@@ -852,7 +1028,21 @@ function drawCurve(m) {
       { name: '基金净值', type: 'line', data: d.fund, showSymbol: false,
         lineStyle: { width: 1.9, color: PAL[0] } },
       { name: '合成基准', type: 'line', data: d.synth, showSymbol: false,
-        lineStyle: { width: 1.4, color: PAL[1], type: 'dashed' } },
+        lineStyle: { width: 1.4, color: PAL[1], type: 'dashed' },
+        markArea: {
+          silent: true, z: 0,
+          // 色带密度很高（状态平均每 5 天切换一次，而绘图只有约 474 个点），
+          // 全区间看就是一片细条纹，所以压到 0.13 —— 让价格曲线保持主体，
+          // 放大到一两年区间后色带才真正可读。
+          itemStyle: { opacity: 0.13, borderWidth: 0 },
+          data: runs,
+        },
+        markPoint: {
+          symbol: 'circle', symbolSize: 6,
+          data: turns,
+          label: { show: false },
+          tooltip: { formatter: (p) => p.data.value },
+        } },
     ]
   });
 }

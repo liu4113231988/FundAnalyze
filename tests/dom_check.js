@@ -73,7 +73,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       // 泄漏到全局作用域**，所以测试里 `window.eval('METRICS')` 会 ReferenceError。
       // 真浏览器里 <script> 是全局脚本、不存在这个问题。
       // 这里追加一行把词典显式导出，供测试做静态一致性检查。
-      window.eval(code + '\n;window.__METRICS = METRICS;');
+      window.eval(code + '\n;window.__METRICS = METRICS;window.__S = S;');
     } catch (e) {
       errors.push('[eval ' + src + '] ' + (e.stack || e).slice(0, 400));
     }
@@ -323,6 +323,78 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   chk(unused.length === 0, unused.length
     ? `词典中未被任何标签引用的死条目：${unused.join(', ')}`
     : '词典条目全部被页面引用，无死条目');
+
+  console.log('\n[16] 趋势状态（描述性）');
+  const seg = $('trendSeg');
+  chk(seg !== null && seg.children.length === 6,
+    `回看窗口选择器 ${seg ? seg.children.length : 0} 档（应为 1/2/3/5/10/20）`);
+  const onBtn = seg ? seg.querySelector('button.on') : null;
+  chk(onBtn && onBtn.textContent === '10', `默认档位 = ${onBtn ? onBtn.textContent : '—'}`);
+
+  // 后端必须在**日频**序列上判定，再按绘图下标采样下发。
+  // 若长度对不上，说明判定是在降采样序列上做的 —— "回看 10 日"会变成
+  // "回看 10 个采样点 ≈ 40 个交易日"，语义失真且不会报错。
+  const S = window.__S;
+  chk(!!S && !!S.result, '应用状态 S 可访问（测试注入）');
+  let trendOk = true, trendMsg = '';
+  for (const k of Object.keys((S && S.result && S.result.models) || {})) {
+    const mm = S.result.models[k];
+    const tr = (mm.curve || {}).trend;
+    if (!tr || !tr.codes || !tr.stats) { trendOk = false; trendMsg = `${k} 缺 trend`; break; }
+    for (const n of tr.levels) {
+      const c = tr.codes[String(n)];
+      if (!c || c.length !== mm.curve.dates.length) {
+        trendOk = false;
+        trendMsg = `${k} N=${n} codes ${c ? c.length : 0} ≠ dates ${mm.curve.dates.length}`;
+      }
+    }
+    if (!trendOk) break;
+  }
+  chk(trendOk, trendOk ? '每个模型的 trend.codes 长度 = 绘图点数（判定在日频上做）'
+    : 'codes 与绘图点数不一致：' + trendMsg);
+
+  const card = $('trendCard');
+  chk(card && card.textContent.length > 40, '状态卡已渲染');
+  const cardTxt = card ? card.textContent : '';
+  chk(/上升趋势|下降趋势|震荡|拐头/.test(cardTxt), '状态卡含状态标签: ' +
+    (card ? (card.querySelector('.tc-state') || {}).textContent : ''));
+  chk(card.querySelectorAll('.tc-grid > div').length === 5,
+    `判据明细 ${card.querySelectorAll('.tc-grid > div').length} 项（应为 5）`);
+  chk(/体制态 \d+ 段/.test(cardTxt) && /拐头 \d+ 次/.test(cardTxt),
+    '状态卡含历史可靠性统计（体制态段数 + 拐头次数）');
+  chk(!/NaN|undefined|Infinity/.test(cardTxt), '状态卡无 NaN/undefined');
+
+  // 色带（体制态）与拐头点（瞬时标记）必须都画进图表
+  const cvT = charts.filter(c => c.__el === 'chartCurve').pop();
+  const synthSeries = cvT && cvT.__opt
+    ? (cv.__opt.series || []).find(s => s.name === '合成基准') : null;
+  chk(!!synthSeries, '合成基准序列存在');
+  if (synthSeries) {
+    const areas = ((synthSeries.markArea || {}).data || []).length;
+    const pts = ((synthSeries.markPoint || {}).data || []).length;
+    chk(areas > 0, `历史状态色带 ${areas} 段`);
+    chk(pts > 0, `拐头标记 ${pts} 个`);
+  }
+
+  // 切换回看窗口：状态卡与色带都要跟着变
+  const beforeTxt = card.querySelector('.tc-state').textContent;
+  const lastBtn = seg.children[seg.children.length - 1];
+  lastBtn.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await sleep(400);
+  chk(/回看 20 个交易日/.test($('trendCard').textContent),
+    '切到 N=20 后状态卡窗口已更新');
+  chk(seg.querySelector('button.on').textContent === '20', '选择器高亮已跟随');
+  const cv2 = charts.filter(c => c.__el === 'chartCurve').pop();
+  const s2 = cv2 && cv2.__opt
+    ? (cv2.__opt.series || []).find(s => s.name === '合成基准') : null;
+  const areas2 = s2 ? ((s2.markArea || {}).data || []).length : 0;
+  chk(areas2 > 0, `切换后色带已重画（${areas2} 段，状态 ${beforeTxt}）`);
+
+  // 定位声明：必须写明"不是买卖建议"
+  const noteTxt = $('main').textContent;
+  chk(noteTxt.includes('不是买卖建议'), '页面含「不是买卖建议」的定位声明');
+  chk(/RankIC[\s\S]{0,40}−0\.073|RankIC[\s\S]{0,40}-0\.073/.test(noteTxt),
+    '声明中给出了日频择时证伪的依据（RankIC −0.073）');
 
   console.log('\n' + '='.repeat(60));
   console.log(`失败项：${fails}`);

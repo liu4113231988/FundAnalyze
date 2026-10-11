@@ -528,11 +528,127 @@ def t8():
         f"高换手方案（换手 {tur[hi_name]:.0f}）在所有成本档下均无正贡献")
 
 
+# ============================================================== T9 趋势状态
+def t9():
+    print("\nT9 · 趋势状态判定（高低点结构）：标签正确性与退化边界")
+    from src.trend_state import (classify_series, classify_at, summarize,
+                                 run_lengths, trend_payload, TREND_LEVELS)
+
+    # --- 9a 单调上升 / 下降：结构最清晰的情形
+    up = list(range(1, 21))
+    dn = list(range(20, 0, -1))
+    for n in (1, 2, 3, 5, 10):
+        cu = classify_series(up, n)
+        cd = classify_series(dn, n)
+        body_u = cu[2 * n - 1:]
+        body_d = cd[2 * n - 1:]
+        chk(all(c == 'U' for c in body_u),
+            f"N={n} 单调上升 → 全程 U（{len(body_u)} 天）")
+        chk(all(c == 'D' for c in body_d),
+            f"N={n} 单调下降 → 全程 D（{len(body_d)} 天）")
+
+    # --- 9b 样本不足：前 2N−1 天必须是占位符，不能凭空判定
+    for n in (1, 3, 5):
+        c = classify_series(up, n)
+        chk(all(x == '.' for x in c[:2 * n - 1]),
+            f"N={n}：前 {2 * n - 1} 天为占位符（样本不足）")
+
+    # --- 9c 编码长度必须等于序列长度（前端按下标一一对应取色）
+    for n in (1, 2, 5, 10):
+        chk(len(classify_series(up, n)) == len(up),
+            f"N={n}：编码长度 = 序列长度")
+
+    # --- 9d N=1 退化：只能比单日涨跌，出不了震荡与拐头
+    rng = np.random.default_rng(3)
+    noisy = list(np.cumsum(rng.normal(0, 1, 400))) 
+    c1 = classify_series(noisy, 1)
+    kinds1 = set(c1) - {'.'}
+    chk(kinds1 <= {'U', 'D'},
+        f"N=1 只产生 U/D，实际出现的状态 {sorted(kinds1)}")
+    chk('R' in set(classify_series(noisy, 5)) - {'.'},
+        "N=5 时同样的序列能判出震荡（说明 N=1 是退化而非数据问题）")
+
+    # --- 9e 震荡：高点抬高但低点同时降低（区间扩张）必须判为 R。
+    #     构造要让"两组各 N 日"真的满足：prior=[3,8]（高 8 低 3）、
+    #     recent=[1,9]（高 9 低 1）→ 高升但低降，两个方向的条件都不满足。
+    seq = [3.0, 8.0, 1.0, 9.0]
+    r = classify_at(np.asarray(seq), 3, 2, 'U')
+    chk(r is not None and r['hr'] == 9 and r['lr'] == 1
+        and r['hp'] == 8 and r['lp'] == 3 and r['code'] == 'R',
+        f"高点抬高+低点降低 → 震荡（高 {r['hr']}/{r['hp']} 低 {r['lr']}/{r['lp']}"
+        f"，实际 {r['code'] if r else '—'}）")
+    # 对照：两组极值都抬高才是上升
+    seq2 = [1.0, 4.0, 3.0, 5.0]
+    r2 = classify_at(np.asarray(seq2), 3, 2, 'U')
+    chk(r2 is not None and r2['code'] == 'U',
+        f"高点与低点都抬高 → 上升（实际 {r2['code'] if r2 else '—'}）")
+
+    # --- 9f 拐头向下：上升途中冲高回落。
+    #     条件 = 结构未反转 + 极值落在窗口前半段 + 当前值在区间下 1/3
+    #            + 前一日同为向上（否则只是"处在低位"，不是"转折"）
+    turn_dn = [8, 9, 10, 11, 12, 13, 14, 13, 12, 11]
+    cd = classify_series(turn_dn, 4)
+    chk('d' in cd, f"上升后冲高回落 → 出现拐头向下（{''.join(cd)}）")
+    # 去掉"前一日同向"这个条件就不该出现 —— 用一个持续下降序列验证
+    cd2 = classify_series(list(range(20, 0, -1)), 4)
+    chk('d' not in cd2 and 'u' not in cd2,
+        "持续下降序列不产生拐头（前一日非向上 → 不满足转折条件）")
+
+    # --- 9g 拐头向上：与 9f 镜像
+    turn_up = [-x for x in turn_dn]
+    cu = classify_series(turn_up, 4)
+    chk('u' in cu, f"下降后探底回升 → 出现拐头向上（{''.join(cu)}）")
+
+    # --- 9h 段长统计：拐头段长必须恒为 1，且与体制态分开统计
+    codes = classify_series(noisy, 5)
+    rl = run_lengths(codes)
+    chk(all(x == 1 for x in rl['turn']) if rl['turn'] else True,
+        f"拐头段长恒为 1 天（共 {len(rl['turn'])} 段，"
+        f"取值 {sorted(set(rl['turn']))}）")
+    chk(all(x >= 1 for x in rl['regime']),
+        f"体制态段长统计正常（{len(rl['regime'])} 段）")
+    st = summarize(codes)
+    chk(st['regime_runs'] == len(rl['regime'])
+        and st['turn_runs'] == len(rl['turn']),
+        "summarize 与 run_lengths 的段数一致")
+    chk(st['regime_mean'] > 0 and st['days'] > 0,
+        f"summarize 给出均值 {st['regime_mean']} 天 / 有效 {st['days']} 天")
+
+    # --- 9i 打乱时间顺序后方向性标签应显著减少（判据抓的是真结构，不是噪声）
+    real_d = sum(1 for c in classify_series(noisy, 5) if c in ('U', 'D'))
+    shuf = noisy[:]
+    for i in range(len(shuf) - 1, 0, -1):
+        j = int(rng.integers(0, i + 1))
+        shuf[i], shuf[j] = shuf[j], shuf[i]
+    shuf_d = sum(1 for c in classify_series(shuf, 5) if c in ('U', 'D'))
+    chk(real_d > shuf_d,
+        f"真实序列的方向性标签 {real_d} > 打乱后 {shuf_d}"
+        f"（判据确实抓到了时序结构）")
+
+    # --- 9j trend_payload：codes 长度必须等于绘图下标长度
+    import pandas as pd
+    idx = pd.bdate_range("2020-01-01", periods=300, name="date")
+    nav = pd.Series(np.exp(np.cumsum(rng.normal(0, 0.01, 300))), index=idx)
+    plot_idx = idx[::4]
+    pl = trend_payload(nav, plot_idx)
+    chk(set(pl['levels']) == set(TREND_LEVELS),
+        f"payload 含全部 {len(TREND_LEVELS)} 个回看窗口")
+    bad = [k for k, v in pl['codes'].items() if len(v) != len(plot_idx)]
+    chk(not bad, f"每个窗口的 codes 长度 = 绘图点数 {len(plot_idx)}"
+        + (f"（异常：{bad}）" if bad else ""))
+    chk(all(pl['last'][k] is not None for k in map(str, TREND_LEVELS)),
+        "每个窗口都给出了最后一天的关键判据数值")
+    chk(all(set(pl['stats'][k]) >= {'regime_runs', 'regime_mean',
+                                    'regime_median', 'turn_runs'}
+            for k in map(str, TREND_LEVELS)),
+        "每个窗口都给出了历史可靠性统计")
+
+
 def main():
     print("=" * 78)
     print("P0 修复回归验证")
     print("=" * 78)
-    for fn in (t1, t2, t3, t4, t5, t6, t7, t8):
+    for fn in (t1, t2, t3, t4, t5, t6, t7, t8, t9):
         try:
             fn()
         except Exception as e:                                # noqa: BLE001

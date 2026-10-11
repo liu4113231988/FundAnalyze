@@ -19,7 +19,8 @@ for _d in (DATA_DIR, FIG_DIR, RES_DIR):
 
 # Web 结果缓存版本：修改拟合/回测口径后必须 +1，旧版缓存文件会被自动清理
 # 3 = 仓位约束改为自适应（auto_equity 默认 True），拟合口径整体变化
-CACHE_VERSION = 3
+# 4 = 曲线新增 trend 字段（合成基准的趋势状态，在日频序列上判定后按绘图下标采样）
+CACHE_VERSION = 4
 
 # 数据缓存版本：修改 align_prices / 覆盖率阈值 / 候选池等取数口径后 +1，
 # 旧版 output/data/panel_*.csv 会被自动判为过期并重新抓取。

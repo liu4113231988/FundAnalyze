@@ -132,8 +132,27 @@
 
     <div class="grid2">
       <div class="panel">
-        <h4>拟合曲线 · 基金 vs 合成基准</h4>
+        <div class="p-head">
+          <h4>拟合曲线 · 基金 vs 合成基准</h4>
+          <label class="seg-wrap">
+            <span class="seg-lb">趋势回看
+              <span class="mh" data-m="trend_lookback">?</span></span>
+            <span class="seg" id="trendSeg"></span>
+            <span class="seg-unit">交易日</span>
+          </label>
+        </div>
+        <div id="trendCard" class="trend-card"></div>
         <div id="chartCurve" class="chart"></div>
+        <p class="note trend-note">
+          <b class="tn-tag">这是形态描述，不是买卖建议。</b>
+          本项目已用 14 只基金做样本外检验证明：日频方向信号无法超越
+          <span class="mh" data-m="control">恒定仓位对照<i class="mi">?</i></span>
+          （<span class="mh" data-m="rank_ic">RankIC<i class="mi">?</i></span>
+          均值 −0.073，13/14 只为负）。色带只回答「合成基准这一段长什么样」，
+          <b>不含任何持仓含义</b>，也不代表未来。
+          判据为<span class="mh" data-m="trend_state">高低点结构<i class="mi">?</i></span>：
+          相邻两组各 N 日的「高点抬高 + 低点抬高」判为上升，双向都降低判为下降，
+          其余判为震荡；拐头另需极值已落到前半段且价格回到区间两端 1/3。 </p>
       </div>
       <div class="panel">
         <h4>拟合残差（基金 − 合成基准）</h4>
