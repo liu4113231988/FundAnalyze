@@ -153,9 +153,12 @@ RBSA = dict(
     max_rebal=60,        # 滚动重估点上限（超出则均匀抽稀，控制 Web 首屏耗时）
     # 重估点构造方式。"linspace" = 按样本总长度均匀抽稀（快，但追加数据会让
     # 历史重估点漂移，实测 52/60 位移）；"calendar" = 按自然季度末锚点取样
-    # （前缀稳定，研究结论应使用它，代价是每季 1 点、密度更低）。
-    # ★ 目前仍是 linspace：切到 calendar 会改变所有历史结果，需在口径重算时
-    #   一并切换，不能无声改默认值（见 TODO P0-04）。
+    # （前缀稳定，代价是每季 1 点、密度更低）。
+    # ★ 注意（N-06 更正）：RBSA.fit_rolling 传的是 max_rebal=None（不抽稀），
+    #   因此研究路径（run_experiments / run_walkforward / run_robustness）
+    #   的前缀**本来**就是稳定的，无需切换。会漂移的只有 Web 的抽稀模式，
+    #   故默认仍为 linspace；若 Web 也要兼顾前缀稳定，改成 "calendar"
+    #   （会改变 Web 首屏结果，需连同 CACHE_VERSION 一起 +1）。
     rebal_mode="linspace",
     # ★ 默认开启自适应仓位。固定 0.9 对混合型基金是灾难性的：
     #   实测 163402 / 000001 / 519005 在 Σw=0.9 下窗口内 R² 中位数为 0.000，

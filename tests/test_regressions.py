@@ -297,11 +297,48 @@ def r10():
         "仍返回可用的 FitResult（权重全为有限值）")
 
 
+# ============================================================ R11 健康门控遇 NaN
+def r11():
+    print("\nR11 · R² 为 NaN 时，健康门控必须判为不可信而不是被 ffill 掩盖")
+    from src.signal import SignalEngine, build_decision, health_stats
+    rng = np.random.default_rng(5)
+    n = 700
+    idx = pd.bdate_range("2016-01-01", periods=n)
+    r = rng.normal(0.0004, 0.012, n)
+    nav = pd.Series(np.exp(np.cumsum(r)), index=idx)
+    syn_ret = pd.Series(r * 0.9, index=idx)
+    diag_idx = idx[::60]
+    r2 = np.abs(rng.normal(0.85, 0.03, len(diag_idx)))
+    r2[:10] = np.nan                       # 前 10 个重估点"目标无变异"
+    fit_diag = pd.DataFrame({
+        "r2": r2,
+        "te": np.abs(rng.normal(0.02, 0.003, len(diag_idx))),
+        "alpha": np.zeros(len(diag_idx))}, index=diag_idx)
+    w = pd.DataFrame(np.abs(rng.normal(0.3, 0.05, (len(diag_idx), 3))),
+                     index=diag_idx, columns=list("abc"))
+    eng = SignalEngine()
+    h = eng.fit_health_channel(nav, syn_ret, fit_diag, w)
+
+    nan_days = h["fit_r2"].isna()
+    chk(bool(nan_days.any()), "R² 为 NaN 的窗口确实传导到了健康通道（没被 ffill 掩盖）")
+    if nan_days.any():
+        chk(bool((h["fit_reliable"][nan_days] == 0).all()),
+            "这些日期的拟合可信度 = 0（判为不可信，而非当成正常拟合）")
+        hs = health_stats(h)
+        chk(hs["unreliable_ratio"] > 0,
+            f"门控诊断报告不可信比例 {hs['unreliable_ratio']:.1%}（可见）")
+    chk(bool(np.isfinite(h["health_score"].dropna()).all()),
+        "健康分不含非有限值（NaN 不会顺着健康分扩散到买卖决策）")
+    dec, tr = build_decision(h)
+    chk(len(dec) == len(h), "build_decision 在含 NaN 的诊断上仍返回完整序列")
+    chk(bool(np.isfinite(dec.astype(float)).all()), "决策序列不含非有限值")
+
+
 def main():
     print("=" * 78)
     print("本轮 TODO 修复 · 行为回归")
     print("=" * 78)
-    for fn in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10):
+    for fn in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11):
         try:
             fn()
         except Exception as e:                                # noqa: BLE001

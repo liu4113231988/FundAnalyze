@@ -278,7 +278,15 @@ class SignalEngine:
         nav = nav.reindex(idx)
 
         if fit_diag is not None and not fit_diag.empty:
-            diag = fit_diag[["r2", "te"]].reindex(idx, method="ffill")
+            src = fit_diag[["r2", "te"]]
+            diag = src.reindex(idx, method="ffill")
+            # ★ 不能用 method="ffill" 到底（P0-05 / N-10）：ffill 会把 NaN 也
+            #   当作"可填充值"传播出去。R² 现在可能合法地为 NaN（窗口内目标无变异、
+            #   即该段根本没有可解释的收益结构），若被 ffill 成上一个窗口的 R²，
+            #   这个失效窗口就被静默掩盖，健康门控照常给"拟合可信"。
+            #   这里把"源数据里就是 NaN"的窗口显式还原成 NaN。
+            bad_src = src.isna().any(axis=1).reindex(idx, fill_value=False)
+            diag.loc[bad_src] = np.nan
         else:
             diag = pd.DataFrame(index=idx, columns=["r2", "te"], dtype=float)
         r2, te = diag["r2"], diag["te"]
@@ -318,7 +326,10 @@ class SignalEngine:
         # 与"这只基金该不该卖"是两件不同的事。R² 低 → 证据不可信，
         # 正确响应是停用门控（见 build_decision），而不是卖出基金。
         r2_min = float(c.get("health_r2_min", 0.5))
-        fit_reliable = ((r2 - (r2_min - 0.15)) / 0.15).clip(0.0, 1.0)
+        # ★ R² 未定义（窗口内目标无变异）→ 证据不可信，显式给 0（P0-05 / N-10）。
+        #   不 fillna 的话 NaN 会一路传到 fit_reliable，前端看到的是空白
+        #   而不是"不可信"，而健康门控本应在此时停用。
+        fit_reliable = ((r2 - (r2_min - 0.15)) / 0.15).clip(0.0, 1.0).fillna(0.0)
 
         comps = pd.DataFrame({
             # 只看相对自身中枢的下降。刻度 20pp 而不是 10pp：

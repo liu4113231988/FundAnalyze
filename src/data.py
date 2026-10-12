@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import socket
@@ -35,14 +36,35 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")
 
-# ★ P1-07：AkShare 的请求没有暴露 timeout 参数，一次网络挂起会把整个分析任务
-#   （以及承载它的 Web 线程）永久卡住。这里给 socket 设一个默认超时作为兜底。
-#   想要更长/更短可用环境变量 FIL_HTTP_TIMEOUT 覆盖；设为 0 表示不限制。
-try:
-    _tmo = float(os.environ.get("FIL_HTTP_TIMEOUT", "30"))
-    socket.setdefaulttimeout(_tmo if _tmo > 0 else None)
-except (TypeError, ValueError):                     # noqa: BLE001
-    pass
+
+def _default_http_timeout() -> float:
+    """抓取超时（秒）。FIL_HTTP_TIMEOUT=0 表示不限制。"""
+    try:
+        v = float(os.environ.get("FIL_HTTP_TIMEOUT", "30"))
+    except (TypeError, ValueError):                        # noqa: BLE001
+        return 30.0
+    return v if v > 0 else 0.0
+
+
+@contextlib.contextmanager
+def http_timeout(seconds: Optional[float] = None):
+    """
+    只在抓取期间生效的 socket 默认超时（P1-07 / N-05）。
+
+    ★ 为什么不能写在模块级 `socket.setdefaulttimeout(30)`：
+      它是**进程全局**的，会影响本进程里之后新建的**所有** socket ——
+      包括 Flask 服务器的监听 socket 与已 accept 的连接 socket。
+      本意只是防止 AkShare 请求永久挂起，结果把 Web 服务也罩进同一个
+      30 秒超时里（长连接、慢客户端都可能被误杀）。改成上下文管理器后，
+      只有真正在抓数据的代码段受影响。
+    """
+    old = socket.getdefaulttimeout()
+    sec = _default_http_timeout() if seconds is None else seconds
+    socket.setdefaulttimeout(sec if sec and sec > 0 else None)
+    try:
+        yield
+    finally:
+        socket.setdefaulttimeout(old)
 
 from . import config as C
 
@@ -51,11 +73,14 @@ from . import config as C
 def _retry(fn, tries: int = 4, wait: float = 1.2, **kw):
     last = None
     for i in range(tries):
-        try:
-            return fn(**kw)
-        except Exception as e:      # noqa: BLE001
-            last = e
-            time.sleep(wait * (i + 1))
+        # ★ 超时只在抓取期间生效（N-05）：AkShare 的请求没有暴露 timeout 参数，
+        #   但 socket 级的全局默认值会波及 Web 服务器，所以必须局部设置。
+        with http_timeout():
+            try:
+                return fn(**kw)
+            except Exception as e:      # noqa: BLE001
+                last = e
+        time.sleep(wait * (i + 1))
     raise last
 
 
@@ -338,6 +363,17 @@ def _cache_meta_path(name: str) -> Path:
     return C.DATA_DIR / f"{name}.meta.json"
 
 
+def _fingerprint(meta: dict) -> dict:
+    """
+    只取**参与有效性判等**的字段。
+
+    ★ 必须把 "info" 排除掉（N-07）：info 里放的是抓取时间、数据末日、行数、
+    缺失资产这类**描述性**信息，它们每次抓取都会变。若让它们参与相等比较，
+    缓存会每次都判为失效 → 每次全量重建，等于没有缓存。
+    """
+    return {k: v for k, v in (meta or {}).items() if k != "info"}
+
+
 def _cache_meta_valid(name: str, meta: dict) -> bool:
     """
     缓存是否仍有效。
@@ -350,9 +386,10 @@ def _cache_meta_valid(name: str, meta: dict) -> bool:
     if not fp.exists():
         return True
     try:
-        return json.loads(fp.read_text(encoding="utf-8")) == meta
+        saved = json.loads(fp.read_text(encoding="utf-8"))
     except Exception:               # noqa: BLE001
         return True
+    return _fingerprint(saved) == _fingerprint(meta)
 
 
 def _cache_meta_write(name: str, meta: dict):
@@ -361,6 +398,33 @@ def _cache_meta_write(name: str, meta: dict):
             json.dumps(meta, ensure_ascii=False, sort_keys=True), encoding="utf-8")
     except Exception:               # noqa: BLE001
         pass
+
+
+def cache_info(name: str) -> dict:
+    """
+    读某个缓存的描述性信息（P1-05 / N-07）：抓取时间、数据末日、行数、缺失资产。
+
+    用途：回答"这份缓存是什么时候抓的、抓到哪天、缺了哪些资产" ——
+    旧缓存只有一个版本号，出问题时无法判断该重抓还是该补取。
+    """
+    fp = _cache_meta_path(name)
+    if not fp.exists():
+        return {}
+    try:
+        return (json.loads(fp.read_text(encoding="utf-8")) or {}).get("info", {})
+    except Exception:                                    # noqa: BLE001
+        return {}
+
+
+def _cache_info_write(name: str, info: dict):
+    """把描述性信息合并进现有 meta（不触碰参与判等的指纹字段）。"""
+    fp = _cache_meta_path(name)
+    try:
+        cur = json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {}
+    except Exception:                                    # noqa: BLE001
+        cur = {}
+    cur.setdefault("info", {}).update(info)
+    _cache_meta_write(name, cur)
 
 
 def _os_replace_retry(src: Path, dst: Path, retries: int = 6):
@@ -413,15 +477,37 @@ def _cached(name: str, builder, meta: Optional[dict] = None):
                 # 之后有人改 DATA_CACHE_VERSION 时，_cache_meta_valid 会因为
                 # 找不到元数据而一律判为有效，缓存照样命中，守卫形同虚设。
                 if meta is not None:
-                    _cache_meta_write(name, meta)
+                    _cache_meta_write(name, _with_info(meta, df))
                 return df
         except Exception as e:      # noqa: BLE001
             print(f"[data] 缓存 {name} 损坏（{type(e).__name__}），重新构建")
     df = builder()
     _atomic_csv_write(df, fp)
     if meta is not None:
-        _cache_meta_write(name, meta)
+        _cache_meta_write(name, _with_info(meta, df))
     return df
+
+
+def _with_info(meta: dict, df) -> dict:
+    """
+    给 meta 补上描述性 info（N-07）：抓取时间、数据末日、行数。
+
+    这些字段**不参与** _cache_meta_valid 的判等（见 _fingerprint），
+    否则每次抓取时间不同都会让缓存失效。
+    """
+    meta = dict(meta or {})
+    info = dict(meta.get("info") or {})
+    info.setdefault("fetched_at", time.strftime("%Y-%m-%d %H:%M:%S"))
+    if isinstance(df, pd.DataFrame) and len(df.index):
+        try:
+            info.setdefault("data_end", str(pd.Timestamp(df.index[-1]).date()))
+            info.setdefault("data_start", str(pd.Timestamp(df.index[0]).date()))
+            info.setdefault("n_rows", int(len(df)))
+            info.setdefault("n_cols", int(df.shape[1]))
+        except (TypeError, ValueError, IndexError):        # noqa: BLE001
+            pass
+    meta["info"] = info
+    return meta
 
 
 # ------------------------------------------------------------------ 分层缓存
@@ -454,7 +540,20 @@ def load_index_universe(start: str = C.START_DATE,
             print(f"[data] 抓取候选指数池 {len(C.NAME_OF)} 个 ...")
         return fetch_universe(C.NAME_OF.keys(), start, end, verbose=verbose)
 
-    return _cached(cache_name, build, meta=meta)
+    df = _cached(cache_name, build, meta=meta)
+    # ★ 缺失资产必须留痕（N-07）：部分行情失败会静默得到一个"不完整指数池"，
+    #   下游的覆盖率过滤会把它们当"中途停编"剔除，掩盖了真实原因是抓取失败。
+    #   无条件写入（空列表 = 无缺失），否则"没这个字段"和"没缺失"分不清。
+    missing = [c for c in C.NAME_OF if c not in df.columns]
+    _cache_info_write(cache_name, {
+        "missing_assets": missing,
+        "n_missing": len(missing),
+        "n_expected": len(C.NAME_OF)})
+    if missing:
+        print(f"[data] ⚠ 候选池缺 {len(missing)}/{len(C.NAME_OF)} 个指数"
+              f"（{', '.join(missing[:6])}{'…' if len(missing) > 6 else ''}）"
+              f"——重跑本命令可补齐，已成功的部分不会重复请求")
+    return df
 
 
 def load_fund_nav_cached(fund_code: str, start: str = C.START_DATE,

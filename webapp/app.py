@@ -244,7 +244,14 @@ def api_analyze():
         except Exception:                             # noqa: BLE001
             pass
 
-    jid = JOBS.create(code, models)
+    # ---- 相同任务合并（N-08）：同参数的重复请求复用同一个 job_id，
+    #      而不是起第二个进程池互相抢 CPU、最后还写同一个缓存文件。
+    _key = f"{code}|{','.join(sorted(models))}|{max_rebal}|{auto_equity}"
+    _exist = JOBS.find_running(_key)
+    if _exist:
+        return jsonify({"ok": True, "job_id": _exist, "cached": False,
+                        "merged": True})
+    jid = JOBS.create(code, models, key=_key)
 
     def worker():
         try:

@@ -29,7 +29,9 @@ import pandas as pd
 
 from src import config as C, data as D
 from src.rbsa import RBSA
-from src.robustness import assess_positions
+from src.robustness import (assess_positions, assess_signal_edge,
+                            bootstrap_sensitivity, hac_sensitivity,
+                            multiplicity_adjust)
 from src.signal import SignalEngine, build_decision
 
 pd.set_option("display.width", 200)
@@ -71,6 +73,21 @@ def _report(res: dict) -> None:
          else "边缘" if b["p_value"] < 0.10 else "不显著")
     print(f"  判定：{v}")
 
+    # [4] 敏感性：结论不应依赖某个拍出来的块长 / HAC 滞后（P1-03）
+    ex = res["excess"]
+    print("\n[4] 块长敏感性（默认 60 日块是拍的，不是推出来的）")
+    sens_b = bootstrap_sensitivity(ex, blocks=(20, 60, 120, 250), n_boot=1000)
+    print(sens_b.round(4).to_string(index=False))
+    print("\n[5] Newey-West 带宽敏感性（逐基金超额均值 t 值）")
+    sens_h = hac_sensitivity(ex, lags=(0, 5, 10, 21))
+    if not sens_h.empty:
+        cols = [c for c in sens_h.columns if c != "基金"]
+        print(f"  |t|>1.96 的基金数：")
+        for c in cols:
+            print(f"    {c:12s}  {(sens_h[c].abs() > 1.96).sum()}/{len(sens_h)}")
+    else:
+        print("  （有效基金数不足 120 个观测，跳过）")
+
     pf = res["per_fund"]
     print("\n[结论]")
     print(f"  · 有效独立样本量只有 {eff['n_eff']:.1f} 个"
@@ -86,12 +103,15 @@ def main():
     codes = sys.argv[1:] or list(C.EXTENDED_FUNDS.keys())
     t0 = time.time()
     nav_by, pos_vt, pos_hg = {}, {}, {}
+    syn_by, wt_by = {}, {}
     for c in codes:
         panel = D.load_panel(c, verbose=False)
         fit = RBSA().fit_rolling(panel, verbose=False)
         syn = RBSA.synth_nav(fit["syn_ret"], 1.0)
         nav = panel["__FUND__"].reindex(syn.index)
         nav_by[c] = nav
+        syn_by[c] = syn
+        wt_by[c] = fit["weights"]
         # 波动率目标：吃的是价格序列（内部自己算 log 收益）
         pos_vt[c] = SignalEngine().vol_target_channel(syn)["vol_target_pos"]
         # 健康门控：★ 第 2 个参数必须是**收益率**（syn_ret），不是 synth_nav 价格。
@@ -107,11 +127,13 @@ def main():
               f"门控交易={len(_tr)}")
 
     panel = D.load_panel(codes[0], verbose=False)
+    market = (panel["sh000300"] if "sh000300" in panel.columns else None)
     jobs = (
         ("拟合健康决策", pos_hg, "健康门控"),
         ("波动率目标(逆波动)", pos_vt, "波动率目标"),
     )
     out = C.RES_DIR
+    pvals, tags = [], []
     for label, pos, tag in jobs:
         res = assess_positions(nav_by, pos, panel, label=label)
         _report(res)
@@ -134,6 +156,40 @@ def main():
             "NW显著只数": res["factor"]["n_sig"] if res.get("factor") else None,
         }]).to_csv(out / f"E7_稳健性_{tag}_汇总.csv", index=False,
                    encoding="utf-8-sig")
+        pvals.append(b["p_value"])
+        tags.append(tag)
+
+    # ---- E4 那条线索本身：250 日窗口 + 120 日再平衡（保留新旧口径对照）
+    # assess_signal_edge 曾是无调用方的死函数；它比 assess_positions 多给了
+    # sharpe_diff_geometric / ann_diff_geometric，正好用来量化
+    # "把几何夏普差换成 IR 口径，结论变了多少"（P1-10 / P0-07）。
+    res_se = assess_signal_edge(nav_by, syn_by, panel, wt_by)
+    _report(res_se)
+    if res_se.get("ok"):
+        res_se["per_fund"].to_csv(out / "E7_稳健性_E4低频_逐基金.csv",
+                                  encoding="utf-8-sig")
+        res_se["excess"].to_csv(out / "E7_稳健性_E4低频_超额序列.csv",
+                                encoding="utf-8-sig")
+        pvals.append(res_se["bootstrap"]["p_value"])
+        tags.append("E4低频")
+
+    # ---- 多重比较校正（P1-03）
+    # 同时检验三条策略，却各自拿单次 α=0.05 判定"显著"，
+    # 等于把假阳性率放大了 3 倍以上。E5 里"37% 的格子天然为正"就是同一效应。
+    if len(pvals) >= 2:
+        df_mc, note = multiplicity_adjust(pvals, names=tags, alpha=0.05,
+                                          method="fdr")
+        df_mc["bonferroni"] = (
+            df_mc["p值"] <= 0.05 / len(pvals)).map({True: "通过", False: "否"})
+        print("\n" + "=" * 96)
+        print("[6] 多重比较校正（同一批基金上检验了 %d 条策略）" % len(pvals))
+        print("=" * 96)
+        print(df_mc.to_string(index=False))
+        print(f"  {note}")
+        print("  ★ 单次检验判为'显著'、校正后不显著 → 只能说'有信号但不足以排除噪声'")
+        df_mc.to_csv(out / "E7_稳健性_多重比较.csv", index=False,
+                     encoding="utf-8-sig")
+
     print(f"\n总耗时 {time.time()-t0:.0f}s  结果写入 {out}")
     return 0
 

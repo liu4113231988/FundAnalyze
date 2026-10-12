@@ -22,7 +22,8 @@ import pandas as pd
 from src import config as C, data as D
 from src.pipeline import run_fund, save_result
 from src.experiments import (ic_term_structure, lowfreq_grid,
-                             cost_sensitivity, cost_durability)
+                             cost_sensitivity, cost_durability,
+                             naive_benchmarks)
 
 pd.set_option("display.width", 220)
 
@@ -31,7 +32,7 @@ def main():
     codes = sys.argv[1:] or list(C.EXTENDED_FUNDS.keys())
     t0 = time.time()
     pe = D.load_pe_panel(verbose=False)
-    per_fund, matrices, ics, costs = [], [], [], []
+    per_fund, matrices, ics, costs, nbs = [], [], [], [], []
 
     for code in codes:
         name = C.EXTENDED_FUNDS.get(code, code)
@@ -73,6 +74,13 @@ def main():
                 "最优_对照年化": best["对照年化"],
             })
 
+            # P2-02 朴素基准：风格画像必须证明自己**胜过**"只用沪深300"
+            # / "所有指数等权"，而不只是"窗口内 R² 看起来挺高"
+            nb = naive_benchmarks(D.load_panel(code, verbose=False))
+            if not nb.empty:
+                nb.insert(0, "基金", name)
+                nbs.append(nb)
+
             # E10 成本敏感性：日频择时（高换手）与健康门控（低换手）对比
             cs = cost_sensitivity(
                 nav, res["signal"],
@@ -96,6 +104,10 @@ def main():
     cdf = pd.concat(costs, ignore_index=True) if costs else pd.DataFrame()
     if not cdf.empty:
         cdf.to_csv(out / "E10_成本敏感性.csv", index=False, encoding="utf-8-sig")
+    nbdf = pd.concat(nbs, ignore_index=True) if nbs else pd.DataFrame()
+    if not nbdf.empty:
+        nbdf.to_csv(out / "X4_扩展_朴素基准.csv", index=False,
+                    encoding="utf-8-sig")
 
     print("\n" + "=" * 108)
     print(f"扩展样本 {len(pf)} 只基金 · 逐基金结果")
@@ -143,6 +155,30 @@ def main():
     print("=" * 108)
     print(e1.pivot_table(index="信号", columns="前瞻期", values="RankIC")
           [["5日", "20日", "60日", "120日", "250日"]].round(4).to_string())
+
+    # ---------------- P2-02 朴素基准
+    if not nbdf.empty:
+        print("\n" + "=" * 108)
+        print("P2-02 · 朴素基准对照：风格画像必须胜过简单基准")
+        print("  R² 保留负值（P0-05）：负的样本外 R² = 连'常数基准'都不如")
+        print("=" * 108)
+        best_single = (nbdf[nbdf["基准"].str.startswith("单一")]
+                       .groupby("基金")["样本外R²"].max().rename("最优单一宽基"))
+        constrained = (nbdf[nbdf["基准"].str.startswith("受约束")]
+                       .groupby("基金")["样本外R²"].max().rename("受约束回归"))
+        eq_w = (nbdf[nbdf["基准"].str.startswith("等权")]
+                .groupby("基金")["样本外R²"].max().rename("等权混合"))
+        cmp_ = pd.concat([best_single, eq_w, constrained], axis=1)
+        cmp_["受约束−最优单一"] = cmp_["受约束回归"] - cmp_["最优单一宽基"]
+        print(cmp_.round(4).to_string())
+        print(f"\n  跨基金均值：最优单一宽基 {best_single.mean():+.4f}，"
+              f"等权混合 {eq_w.mean():+.4f}，"
+              f"受约束回归 {constrained.mean():+.4f}")
+        win = int((cmp_["受约束−最优单一"] > 0).sum())
+        print(f"  受约束回归胜过最优单一宽基的基金数：{win}/{len(cmp_)}")
+        if win <= len(cmp_) / 2:
+            print("  ★ 警告：风格画像在过半基金上并没有超过'只用单一宽基' ——"
+                  "此时 R² 高低主要来自指数数量而不是解释力（P2-02 的核心判据）")
 
     # ---------------- E10 成本敏感性
     if not cdf.empty:

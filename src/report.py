@@ -191,12 +191,45 @@ def _mget(m: pd.DataFrame, label: str, col: str, spec: str = ".4f") -> str:
 
 def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.DataFrame],
                  figs: Dict[str, str], path: Optional[Path] = None,
-                 extra_meta: Optional[dict] = None) -> Path:
+                 extra_meta: Optional[dict] = None,
+                 fingerprint: Optional[dict] = None) -> Path:
     extra_meta = extra_meta or {}
     m = main["backtest"]["metrics"]
     ctrl = main["backtest"]["control_name"]
     tc = main["backtest"]["timing_contrib"]
     top_holdings = _top_holdings(main["exposure"])
+
+    # ---------------- 运行指纹（P1-09 / N-09）
+    # 结论必须能回答"是在哪套代码、哪套依赖、哪份数据、哪些参数下跑的"。
+    # 否则同一份代码换个环境给出不同数字时，连该排查哪一层都不知道。
+    fp = fingerprint or {}
+    fp_rows = []
+    for label, val in (
+            ("生成时间", fp.get("generated_at")),
+            ("git commit", fp.get("git_commit") or "（非 git 环境）"),
+            ("Python", fp.get("python")),
+            ("依赖版本", ", ".join(f"{k} {v}" for k, v
+                              in (fp.get("libs") or {}).items() if v)),
+            ("数据指纹", (fp.get("data") or {}).get("data_stamp")),
+            ("候选指数数", (fp.get("config") or {}).get("n_candidates")),
+            ("bootstrap 种子", (fp.get("seeds") or {}).get("bootstrap")),
+            ("CACHE_VERSION", (fp.get("config") or {}).get("CACHE_VERSION")),
+    ):
+        if val not in (None, ""):
+            fp_rows.append(f"<tr><th>{label}</th>"
+                           f"<td>{_html.escape(str(val))}</td></tr>")
+    _run = fp.get("run") or {}
+    if _run:
+        fp_rows.append("<tr><th>本次运行</th><td>" + _html.escape(
+            ", ".join(f"{k}={v}" for k, v in _run.items())) + "</td></tr>")
+    if fp_rows:
+        fingerprint_html = (
+            '<table class="tbl"><tbody>' + "".join(fp_rows) + "</tbody></table>"
+            '<p class="muted">同一份指纹应能复算出同一份报告。'
+            'git commit、依赖版本或数据指纹任一不同，数字差异就不能归因于"随机性"。</p>')
+    else:
+        fingerprint_html = ('<p class="muted">本次运行未提供指纹'
+                            '（build_report.py 未传 fingerprint）。</p>')
 
     # ---------------- 头部 KPI
     kpis = [
@@ -227,15 +260,26 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
     # ---------------- 绩效对比
     perf = m.reset_index().rename(columns={"方案": "方案"})
     metrics_tbl = _table(perf, index=False, fmts={
-        "年化收益": "pct", "年化波动": "pct", "夏普": "f3", "最大回撤": "pct",
+        "年化收益": "pct", "年化波动": "pct", "夏普": "f3", "算术夏普": "f3",
+        "最大回撤": "pct",
         "Calmar": "f3", "月胜率": "pct1", "累计收益": "pct", "样本天数": "raw"})
+    # N-03：「夏普」这个名字本身有歧义 —— 它是用**几何年化**收益算的，
+    # 而业界默认的 Sharpe 用**算术**超额均值。两个都要显示，并说明差别。
+    metrics_note = (
+        '<p class="muted">口径区分（P1-04）：'
+        '<b>夏普</b> 用几何年化收益计算，衡量"净值曲线本身"的风险调整后收益；'
+        '<b>算术夏普</b> 用算术年化收益计算，是业界默认口径、可与 IR 直接对照。'
+        '两者都给出，避免单一口径误导；<b>信息比率 IR</b> 另在"择时净贡献"一栏，'
+        '定义在<b>超额日收益序列</b>上（夏普与年化都不可加，不能相减）。</p>')
+    metrics_tbl = metrics_tbl + metrics_note
 
     # ---------------- 跨基金汇总
     sum_tbl = _table(summary, index=False, fmts={
         "净贡献_夏普": "p3", "净贡献_年化": "pct", "净贡献_回撤": "pct",
         "策略夏普": "f3", "对照夏普": "f3", "RankIC": "p3", "ICIR": "f3",
         "多头胜率": "pct1", "平均仓位": "pct1", "样本天数": "raw",
-        "最优_超额夏普": "f3", "最优窗口": "raw", "最优周期": "raw"})
+        "最优_超额夏普": "f3", "最优窗口": "raw", "最优周期": "raw",
+        "策略_算术夏普": "f3", "对照_算术夏普": "f3", "有效标签数": "raw"})
 
     # ---------------- 实验区
     PCT_COLS = ("年化收益", "年化波动", "最大回撤", "累计收益",
@@ -359,7 +403,8 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
     RankIC 均值 <b>−0.059</b>（14 只里 13 只为负），
     108 组参数网格中仅 <b>28.7%</b> 为正贡献。
     病因：交易噪声 + 短期反转 + 平均仓位被压低到
-    {_safe(main['backtest']['avg_position'], '.0%')}。</div></div>
+    {_safe(main['backtest']['avg_position'], '.0%')}
+    （★ 这是**该方案的时间平均仓位**，不是基金真实股票仓位；后者看 β 隐含仓位）。</div></div>
 
   <div class="card"><div class="h">⚠️ 存疑：长周期线索</div><div class="b">
     250 日信号窗口 + 120 日再平衡的平均超额夏普 <b>+0.147</b>（86% 基金为正），
@@ -452,7 +497,8 @@ r<sub>f,t</sub> = Σ w<sub>i</sub> · r<sub>i,t</sub> + ε<sub>t</sub>
 {_safe(tc.get('年化收益'), '+.2%')}（年化），夏普 {_safe(tc.get('夏普'), '+.3f')}</b>。
 {_dd_comment(tc.get('最大回撤'))}
 <b>而这正是关键</b>：恒定对照组只是把仓位固定在策略的平均水平
-（{_safe(main['backtest']['avg_position'], '.0%')}），
+（{_safe(main['backtest']['avg_position'], '.0%')}，★ 同上：这是方案的平均仓位，
+不是基金真实股票仓位），
 并没有做任何"择时"。<b>两者表现相当，说明策略的全部差异都来自"仓位水平"，而非"择时能力"。</b></div>
 
 <h3>3.4 信号有效性</h3>
@@ -515,8 +561,12 @@ ICIR = {_safe(main['backtest']['icir'], '.2f')}，
   <li><b>保留并强化风格穿透。</b>这是本框架唯一确定成立的部分。
       叠加季报十大重仓，把 RBSA 权重与真实持仓对照，
       输出「基金实际 beta 暴露 + 超额收益归因」，做成研究工具而非交易工具。</li>
-  <li><b>把择时从日频改为季度频。</b>E4 已证明：信号窗口 250 日、再平衡 60~120 日时
-      超额夏普转正。下一步应在更大的基金池上验证，并把交易成本按场内 ETF 口径重算。</li>
+  <li><b>把择时从日频改为半年频。</b>E4 已证明：信号窗口 250 日、再平衡 60~120 日
+      （120 个交易日 ≈ 半年，不是季度）时超额夏普转正。下一步应在更大的基金池上验证，
+      并把交易成本按场内 ETF 口径重算。</li>
+  <li><b>收益口径需先核实（P0-01）。</b>当前基金收益取自数据源的「累计净值走势」，
+      它与红利再投资净值是否等价尚未用真实分红样本验证；在核实前，
+      本报告所有收益类数字都只是「该口径下」的结果。</li>
   <li><b>把「偏离」通道重新定义。</b>不用 z-score 反转，而是检验
       <b>spread 的趋势是否在衰减</b>（例如滚动 120 日 alpha 斜率的符号与强度），
       由「涨多了减仓」改为「alpha 钝化了才减仓」。</li>
@@ -525,6 +575,11 @@ ICIR = {_safe(main['backtest']['icir'], '.2f')}，
   <li><b>预期收益替代价格动量。</b>趋势通道本质是价格动量，
       可加入盈利预期修正（EPS 上调家数占比）等基本面动量，降低短期反转的伤害。</li>
 </ol>
+</section>
+
+<section>
+<h2><span class="n">08</span>运行指纹（可复现性）</h2>
+{fingerprint_html}
 </section>
 
 <footer>

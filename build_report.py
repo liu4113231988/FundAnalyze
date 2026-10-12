@@ -15,6 +15,7 @@ from src.charts import build_all
 from src.pipeline import run_fund
 from src.report import build_report
 from src.experiments import summarize_funds
+from src.runinfo import write_fingerprint, fingerprint_lines
 
 
 def read_csv_safe(name: str):
@@ -142,7 +143,19 @@ def main():
         "cross_fund_verdict": verdict,
     }
 
-    path = build_report(main_res, summary, experiments, figs, extra_meta=meta)
+    # ---- 运行指纹（P1-09 / N-09）：结论必须能回答"是在哪套环境/数据/参数下跑的"
+    fp = write_fingerprint(
+        C.RES_DIR / "run_fingerprint.json",
+        extra={"fund": code, "models": sorted(main_res.get("models", {}).keys())
+               if isinstance(main_res.get("models"), dict) else None,
+               "max_rebal": C.RBSA.get("max_rebal"),
+               "rebal_mode": C.RBSA.get("rebal_mode")})
+    print("[report] 运行指纹：")
+    for ln in fingerprint_lines(fp):
+        print(ln)
+
+    path = build_report(main_res, summary, experiments, figs, extra_meta=meta,
+                        fingerprint=fp)
     print(f"[report] 完成：{path}")
 
 

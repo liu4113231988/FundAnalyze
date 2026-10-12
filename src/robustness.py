@@ -363,8 +363,10 @@ def assess_signal_edge(nav_by_fund: Dict[str, pd.Series],
             continue
         raw = sig["position_raw"].copy()
         mask = np.zeros(len(raw), dtype=bool)
-        mask[::120] = True                                  # 季度再平衡
-        sampled = raw.where(pd.Series(mask, index=raw.index)).ffill().bfill()
+        mask[::120] = True
+        # ★ 禁止 bfill（P0-04）：它会把后面才算出的仓位回填到序列开头，
+        #   历史输出随"给多少数据"而变。预热段用中性仓位 0.5 补齐。
+        sampled = raw.where(pd.Series(mask, index=raw.index)).ffill().fillna(0.5)
         try:
             bt = run_backtest(nav, sig, variants={"低频再平衡": sampled},
                               main_name="低频再平衡")

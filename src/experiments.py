@@ -297,11 +297,14 @@ def summarize_funds(results: Dict[str, dict]) -> pd.DataFrame:
             "样本天数": int(m.loc["择时策略(融合)", "样本天数"]),
             "策略夏普": m.loc["择时策略(融合)", "夏普"],
             "对照夏普": m.loc[ctrl, "夏普"],
+            "策略_算术夏普": m.loc["择时策略(融合)", "算术夏普"],
+            "对照_算术夏普": m.loc[ctrl, "算术夏普"],
             "净贡献_夏普": bt["timing_contrib"]["夏普"],
             "净贡献_年化": bt["timing_contrib"]["年化收益"],
             "净贡献_回撤": bt["timing_contrib"]["最大回撤"],
             "RankIC": bt["ic"], "ICIR": bt["icir"],
             "多头胜率": bt["win_long"], "平均仓位": bt["avg_position"],
+            "有效标签数": bt.get("n_valid_label"),
         })
     df = pd.DataFrame(rows)
     if len(df):

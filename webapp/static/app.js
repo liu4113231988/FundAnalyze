@@ -173,11 +173,27 @@ const METRICS = {
   // ---------------- 回测评价 ----------------
   sharpe: {
     what: '夏普比率：每承担一单位波动能换来多少超额收益。',
-    how: '<code>(年化收益 − 无风险利率) / 年化波动</code>。',
+    how: '<code>(几何年化收益 − 无风险利率) / 年化波动</code>。',
     read: '长期 0.5 以上算不错，1.0 以上很好。'
       + '但它<b>对“低仓位”有天然偏爱</b>——仓位低、波动小，夏普就好看。'
       + '所以本页必须配「恒定仓位对照」一起看，'
-      + '单看夏普会被仓位差异骗到。',
+      + '单看夏普会被仓位差异骗到。'
+      + '<br><b>注意口径</b>：这里用的是<b>几何</b>年化收益。'
+      + '业界默认的 Sharpe 用<b>算术</b>年化收益，见「算术夏普」。',
+  },
+  sharpe_arith: {
+    what: '算术夏普：用<b>算术</b>年化收益算的夏普，业界默认口径。',
+    how: '<code>(算术年化收益 − 无风险利率) / 年化波动</code>，'
+      + '即 <code>mean(日超额) × 252 / (std × √252)</code>。',
+    read: '与「信息比率 IR」可直接对照（IR 的分母是<b>超额</b>波动）。'
+      + '波动越大，它与几何夏普差得越多；两者接近说明路径平滑。',
+  },
+  win_rate: {
+    what: '多头胜率：给出做多信号的那些天里，未来真的上涨的比例。',
+    how: '分母只计<b>有完整前瞻收益</b>的天数。'
+      + '窗口尾部没有未来数据的天数被剔除，不会算成"猜错"。',
+    read: '<b>必须连"有效标签数"一起看。</b>若有效标签远少于样本天数，'
+      + '这个胜率的置信度很低，不能当作"预测准确率"。',
   },
   calmar: {
     what: 'Calmar 比率：年化收益 ÷ 最大回撤。',
@@ -749,7 +765,12 @@ function renderModelStrip() {
 function renderRank() {
   const r = S.result;
   const rows = r.rank;
-  const maxR2 = Math.max(...rows.map(x => x['样本外R²'] ?? 0), 0.0001);
+  // ★ 负 R² 必须进入归一化基准（P0-05 / N-02）：
+  //   旧写法 Math.max(0, r2) 让负值的条形宽度归零，视觉上与"恰好为 0"无法区分，
+  //   等于把彻底失败的模型显示成"平庸但可用"的模型。
+  const r2vals = rows.map(x => x['样本外R²'])
+    .filter(v => v !== null && v !== undefined && !isNaN(v));
+  const maxAbsR2 = Math.max(...r2vals.map(v => Math.abs(v)), 0.0001);
   const head = ['模型', '流派', mh('interpretable', '可解释'),
     mh('oos_r2', '样本外 R²'), mh('oos_te', '年化 TE'), mh('fit_r2', '窗口内 R²'),
     mh('gap', '训练/样本外差'), mh('win', '方向一致'), mh('beta', '隐含仓位'),
@@ -758,22 +779,36 @@ function renderRank() {
     `<th class="${i < 3 ? 'l' : ''}">${h}</th>`).join('')}</tr></thead><tbody>` +
     rows.map(x => {
       const k = x.key, m = r.models[k] || {};
-      const r2 = x['样本外R²'], gap = (x['窗口内R²'] ?? 0) - (x['样本外R²'] ?? 0);
+      const r2 = x['样本外R²'];
+      const noR2 = (r2 === null || r2 === undefined || isNaN(r2));
+      const neg = !noR2 && r2 < 0;
+      // NaN / 缺失不得当 0：旧写法 `?? 0` 会把"没有数据"显示成"差距可控"
+      const hasGap = !noR2 && x['窗口内R²'] !== null && x['窗口内R²'] !== undefined
+                     && !isNaN(x['窗口内R²']);
+      const gap = hasGap ? (x['窗口内R²'] - r2) : null;
       const bt = x['隐含仓位'];
-      const w = Math.max(0, (r2 ?? 0)) / maxR2 * 100;
+      const w = noR2 ? 0 : Math.abs(r2) / maxAbsR2 * 100;
       const eq = S.cat?.rbsa?.equity_ratio ?? 0.9;
-      const bLow = bt !== null && bt !== undefined && Math.abs(bt) < eq * 0.7;
+      // ★ 去掉 Math.abs(beta)：负 beta 意味着合成基准与基金方向相反，
+      //   比"仓位偏低"严重得多；旧写法把它当成"接近 0"而不告警。
+      const bLow = bt !== null && bt !== undefined && !isNaN(bt)
+                   && (bt < eq * 0.7 || bt < 0);
+      const r2col = noR2 ? 'var(--fg3)' : (neg ? 'var(--bad)' : 'var(--fg)');
       return `<tr class="clickable ${k === S.sel ? 'sel' : ''}" data-k="${k}">
         <td class="l">${x['模型']} ${k === S.best ? '<span class="tag">最佳</span>' : ''}</td>
         <td class="l">${x['流派']}</td>
         <td class="l">${x['可解释']}</td>
-        <td class="bar-cell">${r2 === null ? '—' :
-          `<div class="bg" style="right:14px;width:${w}%"></div><span>${fmtNum(r2, 4)}</span>`}</td>
+        <td class="bar-cell" ${noR2 ? 'title="R² 未定义（窗口内目标无变异）"' :
+          neg ? 'title="负 R²：模型连常数基准都不如"' : ''}>${noR2 ? '—' :
+          `<div class="bg" style="right:14px;width:${w}%;` +
+          `background:${neg ? 'var(--bad)' : 'var(--ok)'};` +
+          `opacity:${neg ? 0.5 : 1}"></div>` +
+          `<span style="color:${r2col}">${fmtNum(r2, 4)}</span>`}</td>
         <td>${fmtPct(x['样本外TE'], 1)}</td>
         <td>${fmtNum(x['窗口内R²'], 4)}</td>
-        <td style="color:${gap > 0.08 ? 'var(--warn)' : 'var(--fg3)'}">${fmtSign(gap, 3)}</td>
+        <td style="color:${gap === null ? 'var(--fg3)' : (gap > 0.08 ? 'var(--warn)' : 'var(--fg3)')}">${gap === null ? '—' : fmtSign(gap, 3)}</td>
         <td>${fmtPct(x['方向一致率'], 1)}</td>
-        <td style="color:${bLow ? 'var(--warn)' : 'var(--fg2)'}">${fmtPct(bt, 0)}</td>
+        <td style="color:${bLow ? 'var(--warn)' : 'var(--fg2)'}" ${bt !== null && bt < 0 ? 'title="负 beta：合成基准与基金方向相反"' : ''}>${fmtPct(bt, 0)}</td>
         <td>${fmtNum(x['耗时'], 1)}</td>
       </tr>`;
     }).join('') + '</tbody>';
@@ -1579,7 +1614,11 @@ function renderBtKpis(p) {
       sb: `${mh('timing_contrib', '择时贡献')} ${fmtPctSign(tc['年化收益'])}`,
       cls: main['年化收益'] > 0 ? 'good' : 'bad' },
     { lb: mh('sharpe', '夏普比率'), vl: fmtNum(main['夏普'], 2),
-      sb: `${mh('timing_contrib', '择时贡献')} ${fmtSign(tc['夏普'], 2)}` },
+      // N-03：几何夏普与算术夏普分开显示。旧页面只给一个"夏普"，
+      // 而它是用几何年化收益算的，与业界默认口径不可直接对照。
+      sb: `${mh('sharpe_arith', '算术夏普')} ` +
+          `${p.summary.sharpe_arithmetic ?? main['算术夏普'] ?? '—'}`
+          + `（几何 ${fmtNum(main['夏普'], 2)}）` },
     { lb: mh('max_dd', '最大回撤'), vl: fmtPct(main['最大回撤'], 1),
       sb: `${mh('timing_contrib', '择时改善')} ${fmtPctSign(tc['最大回撤'])}`, cls: 'bad' },
     { lb: mh('calmar', 'Calmar'), vl: fmtNum(main['Calmar'], 2),
@@ -1590,6 +1629,11 @@ function renderBtKpis(p) {
       sb: '单边换手倍数' },
     { lb: mh('rank_ic', 'RankIC'), vl: fmtNum(p.summary.ic, 3),
       sb: `${mh('icir', 'ICIR')} ${fmtNum(p.summary.icir, 2)}` },
+    // N-02：胜率的分母口径必须一起给。旧页面只显示"99.17%"，
+    // 用户无从知道其中有多少是根本没有前瞻标签的天数。
+    { lb: mh('win_rate', '多头胜率'), vl: fmtPct(p.summary.win_long, 1),
+      sb: `有效标签 ${p.summary.n_valid_label ?? '—'} 天`
+          + `（已剔除尾部无前瞻收益的天数）` },
   ];
   $('btKpis').innerHTML = cards.map(x => `
     <div class="kpi ${x.cls || ''}"><div class="lb">${x.lb}</div>
@@ -1598,7 +1642,8 @@ function renderBtKpis(p) {
 
 function renderBtMetrics(p) {
   const cols = [mh('ann_return', '年化收益'), mh('ann_vol', '年化波动'),
-    mh('sharpe', '夏普'), mh('max_dd', '最大回撤'), mh('calmar', 'Calmar'),
+    mh('sharpe', '夏普'), mh('sharpe_arith', '算术夏普'),
+    mh('max_dd', '最大回撤'), mh('calmar', 'Calmar'),
     mh('monthly_win', '月胜率'), mh('cumulative', '累计收益')];
   const html = `<thead><tr><th class="l">方案</th>${cols.map(c => `<th>${c}</th>`).join('')}
     </tr></thead><tbody>` +
@@ -1609,6 +1654,7 @@ function renderBtMetrics(p) {
         <td style="color:${colOf(x['年化收益'])}">${fmtPctSign(x['年化收益'], 1)}</td>
         <td>${fmtPct(x['年化波动'], 1)}</td>
         <td>${fmtNum(x['夏普'], 2)}</td>
+        <td>${fmtNum(x['算术夏普'], 2)}</td>
         <td style="color:${DOWN}">${fmtPct(x['最大回撤'], 1)}</td>
         <td>${fmtNum(x['Calmar'], 2)}</td>
         <td>${fmtPct(x['月胜率'], 0)}</td>

@@ -186,9 +186,14 @@ class JobStore:
     这样进程重启后历史结果仍可直接打开。
     """
 
+    # 单个任务的墙钟上限（秒）。分析本身数分钟，超过这个数基本是卡住了
+    # （网络挂起、进程池死锁）。超时的任务标为 error，不无限占用并发闸门。
+    JOB_TIMEOUT_SEC = 15 * 60
+
     def __init__(self):
         self._jobs: Dict[str, dict] = {}
         self._lock = threading.Lock()
+        self._cancel: set = set()
 
     def _prune_locked(self):
         """惰性清理：done/error 超过 TTL 的任务整条删除，避免结果常驻内存。"""
@@ -198,17 +203,64 @@ class JobStore:
                    and now - j["created"] >= JOB_TTL_SEC]
         for jid in expired:
             del self._jobs[jid]
+            self._cancel.discard(jid)
 
-    def create(self, code: str, models: List[str]) -> str:
+    def _sweep_timeout_locked(self):
+        """
+        超时清扫。旧实现只清理 done/error，**running 永不超时** ——
+        一旦某个 worker 卡死（网络挂起、进程池死锁），它会一直占着
+        并发闸门，后续所有请求全部 429，且没有任何自愈路径。
+        """
+        now = time.time()
+        for jid, j in self._jobs.items():
+            if j["status"] == "running" and now - j["created"] > self.JOB_TIMEOUT_SEC:
+                j["status"] = "error"
+                j["error"] = (f"任务超时（>{self.JOB_TIMEOUT_SEC // 60} 分钟），"
+                              f"已中断；请重试或检查网络")
+                j["stage"] = "超时"
+                self._cancel.add(jid)
+
+    # ---- 相同任务合并（N-08）
+    def find_running(self, key: str) -> Optional[str]:
+        """
+        按 key 找正在运行的同参数任务。
+
+        旧实现每个请求都新建 job_id，于是同一个基金连点三次"分析"会起三个
+        进程池、互相抢 CPU，最后还写同一个缓存文件。这里让相同运行中的任务
+        复用同一个 job_id，前端轮询到的就是同一份进度。
+        """
+        with self._lock:
+            self._sweep_timeout_locked()
+            for jid, j in self._jobs.items():
+                if j["status"] == "running" and j.get("key") == key:
+                    return jid
+        return None
+
+    def is_cancelled(self, jid: str) -> bool:
+        return jid in self._cancel
+
+    def cancel(self, jid: str) -> bool:
+        """请求取消。worker 应在每个阶段检查 is_cancelled 并及时退出。"""
+        with self._lock:
+            if jid not in self._jobs or self._jobs[jid]["status"] != "running":
+                return False
+            self._cancel.add(jid)
+            self._jobs[jid]["cancel_requested"] = True
+        return True
+
+    def create(self, code: str, models: List[str], key: Optional[str] = None) -> str:
         jid = hashlib.md5(
             f"{code}|{','.join(sorted(models))}|{time.time()}".encode()
         ).hexdigest()[:12]
         with self._lock:
             self._prune_locked()
+            self._sweep_timeout_locked()
             self._jobs[jid] = {
                 "id": jid, "code": code, "models": models,
+                "key": key or f"{code}|{','.join(sorted(models))}",
                 "status": "running", "stage": "准备数据", "progress": 0.0,
                 "detail": [], "result": None, "error": None,
+                "cancel_requested": False,
                 "created": time.time(),
             }
         return jid
@@ -220,14 +272,18 @@ class JobStore:
 
     def get(self, jid: str) -> Optional[dict]:
         with self._lock:
-            self._prune_locked()
+            self._sweep_timeout_locked()
             return self._jobs.get(jid)
 
     def finish(self, jid: str, result: dict):
         self.update(jid, status="done", progress=1.0, stage="完成", result=result)
+        with self._lock:
+            self._cancel.discard(jid)
 
     def fail(self, jid: str, err: str):
         self.update(jid, status="error", stage="失败", error=err)
+        with self._lock:
+            self._cancel.discard(jid)
 
     def public(self, jid: str) -> Optional[dict]:
         j = self.get(jid)
@@ -762,6 +818,14 @@ def analyze(code: str, models: Optional[List[str]] = None,
             "refit": C.RBSA["refit"],
             "max_rebal": (max_rebal if max_rebal is not None
                           else C.RBSA.get("max_rebal")),
+            # ★ N-06：抽稀（max_rebal 非 None）时，重估点由样本总长度的
+            #   linspace 决定，追加数据会让历史重估点漂移（实测 52/60 位移）。
+            #   完整模式（不抽稀）前缀天然稳定 —— 研究结论应使用完整模式，
+            #   或在 run_walkforward / run_experiments 这类入口里跑（它们走
+            #   RBSA.fit_rolling，本身不抽稀）。
+            "rebal_mode": ("linspace" if max_rebal is not None
+                           else C.RBSA.get("rebal_mode", "linspace")),
+            "prefix_stable": bool(max_rebal is None),
             "n_rebal": int(len(reps[next(iter(reps))].weights_hist))
             if reps else 0,
             "equity_ratio": C.RBSA["equity_ratio"],
@@ -855,6 +919,7 @@ def _backtest_payload(code: str, name: str, model_key: str, auto_equity: bool,
                       bt: dict, health: pd.DataFrame, decision: pd.Series,
                       elapsed: float) -> dict:
     eq = bt["equity"]
+    _mn = bt.get("main_name", "择时策略(融合)")
     return {
         "meta": {
             "code": code, "name": name,
@@ -896,12 +961,22 @@ def _backtest_payload(code: str, name: str, model_key: str, auto_equity: bool,
             "turnover": _jnum(bt["turnover"], 2),
             "avg_position": _jnum(bt["avg_position"], 3),
             "win_long": _jnum(bt["win_long"], 3),
+            # N-02：胜率的分母口径必须一起给出去，否则"99.17%"会被误读成
+            # "几乎全对"（旧实现把尾部无效前瞻标签算进了分母）。
+            "n_valid_label": bt.get("n_valid_label"),
             "control_name": bt["control_name"],
             "timing_contrib": _jsafe(bt["timing_contrib"]),
             # 逐方案的对照名与净贡献：只有方案 vs 它自己的对照才是有效比较
             "controls": _jsafe(bt["controls"]),
             "timing_contrib_all": _jsafe(bt["timing_contrib_all"]),
             "avg_position_all": _jsafe(bt["avg_position_all"]),
+            # N-03：夏普有两个口径，都要给（几何 vs 算术）
+            "sharpe_geometric": _jnum(
+                bt["metrics"].loc[_mn, "夏普"], 3)
+            if _mn in bt["metrics"].index else None,
+            "sharpe_arithmetic": _jnum(
+                bt["metrics"].loc[_mn, "算术夏普"], 3)
+            if _mn in bt["metrics"].index else None,
         },
     }
 
