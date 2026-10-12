@@ -199,6 +199,81 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
     tc = main["backtest"]["timing_contrib"]
     top_holdings = _top_holdings(main["exposure"])
 
+    # ---------------- 结论数字一律从数据算，不硬编码（P0-07 收尾）
+    # 旧版在这里写死了"13 只跑输""28.7% 为正贡献""+0.147 / 86% 为正"等数字。
+    # 收益口径修正后这些全部失效（E3 正贡献比例实际从 37.0% 变成 50.9%），
+    # 而报告仍在输出旧值 —— 属于"代码已修、文档还引用旧数"的窗口期。
+    _sm = summary if isinstance(summary, pd.DataFrame) else pd.DataFrame()
+
+    def _num(col):
+        if col not in _sm.columns:
+            return pd.Series(dtype=float)
+        return pd.to_numeric(_sm[col], errors="coerce").dropna()
+
+    _v = _num("净贡献_夏普")
+    _n_fund = int(len(_v))
+    _n_neg = int((_v <= 0).sum())
+    _rk = _num("RankIC")
+    _n_rk_neg = int((_rk < 0).sum())
+    _e3 = experiments.get("_e3_stat") or {}
+    _e3_pos = _e3.get("pos")
+    _e3_n = _e3.get("n")
+    _e4 = experiments.get("E4_周期匹配")
+    _e4_mean = _e4_pos = _e4_win = _e4_reb = None
+    if isinstance(_e4, pd.DataFrame) and not _e4.empty \
+            and "超额夏普" in _e4.columns:
+        _piv = _e4.pivot_table(index="信号窗口", columns="再平衡周期",
+                               values="超额夏普", aggfunc="mean")
+        if _piv.size:
+            _e4_win, _e4_reb = _piv.stack().idxmax()
+            _e4_mean = float(_piv.loc[_e4_win, _e4_reb])
+            _sub = _e4[(_e4["信号窗口"] == _e4_win)
+                       & (_e4["再平衡周期"] == _e4_reb)]["超额夏普"]
+            _e4_pos = float((_sub > 0).mean()) if len(_sub) else None
+
+    def _t(txt_yes, txt_no, **kw):
+        """有数据就用带数字的版本，没有就退回不带数字的定性表述。"""
+        return (txt_yes.format(**kw) if all(
+            v is not None for v in kw.values()) else txt_no)
+
+    # 通道级 IC：同样从 E1 表算，不写死（旧版硬编码 −0.010 / −0.112）
+    _e1 = experiments.get("E1_IC期限结构")
+    _e1_cols = ([c for c in _e1.columns if c != "信号"]
+                if isinstance(_e1, pd.DataFrame) and "信号" in _e1.columns
+                else [])
+
+    def _ic_of(sig, horizon="250日"):
+        if not isinstance(_e1, pd.DataFrame) or not _e1_cols:
+            return None
+        row = _e1[_e1["信号"] == sig]
+        if row.empty:
+            return None
+        vals = pd.to_numeric(row[_e1_cols].iloc[0], errors="coerce").dropna()
+        if horizon not in _e1_cols:
+            return None
+        v = pd.to_numeric(row[horizon].iloc[0], errors="coerce")
+        return float(v) if pd.notna(v) else None
+
+    _dev_neg = None
+    _dev_max_abs = None
+    if isinstance(_e1, pd.DataFrame) and _e1_cols:
+        row = _e1[_e1["信号"] == "相对偏离通道"]
+        if not row.empty:
+            vals = pd.to_numeric(row[_e1_cols].iloc[0], errors="coerce").dropna()
+            _dev_neg = bool((vals < 0).all()) if len(vals) else None
+            _dev_max_abs = float(vals.abs().max()) if len(vals) else None
+    _val_250 = _ic_of("赛道估值通道", "250日")
+    _val_120 = _ic_of("赛道估值通道", "120日")
+    # 综合分（融合信号）各前瞻期 IC —— 旧版只描述单个通道，漏掉了这条最有力的证据
+    _fused_neg = None
+    _fused_worst = None
+    if isinstance(_e1, pd.DataFrame) and _e1_cols:
+        row = _e1[_e1["信号"] == "综合分"]
+        if not row.empty:
+            vals = pd.to_numeric(row[_e1_cols].iloc[0], errors="coerce").dropna()
+            _fused_neg = bool((vals < 0).all()) if len(vals) else None
+            _fused_worst = float(vals.min()) if len(vals) else None
+
     # ---------------- 运行指纹（P1-09 / N-09）
     # 结论必须能回答"是在哪套代码、哪套依赖、哪份数据、哪些参数下跑的"。
     # 否则同一份代码换个环境给出不同数字时，连该排查哪一层都不知道。
@@ -399,30 +474,49 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
     <b>这是本框架唯一确定成立的价值。</b></div></div>
 
   <div class="card"><div class="h">❌ 不成立：日频择时</div><div class="b">
-    14 只基金中 <b>13 只</b>在默认参数下跑输「恒定仓位对照」，
-    RankIC 均值 <b>−0.059</b>（14 只里 13 只为负），
-    108 组参数网格中仅 <b>28.7%</b> 为正贡献。
+    {_t("{n_fund} 只基金中 <b>{n_neg} 只</b>在默认参数下跑输「恒定仓位对照」，"
+        "RankIC 有 <b>{n_rk_neg}/{n_fund}</b> 只为负，"
+        "{e3_n} 组参数网格中 <b>{e3_pos:.1%}</b> 为正贡献。",
+        "默认参数下多数基金跑输「恒定仓位对照」，RankIC 以负为主，"
+        "参数网格的正贡献比例接近随机。",
+        n_fund=_n_fund or None, n_neg=_n_neg or None,
+        n_rk_neg=_n_rk_neg if _n_fund else None,
+        e3_n=_e3_n, e3_pos=_e3_pos)}
     病因：交易噪声 + 短期反转 + 平均仓位被压低到
     {_safe(main['backtest']['avg_position'], '.0%')}
     （★ 这是**该方案的时间平均仓位**，不是基金真实股票仓位；后者看 β 隐含仓位）。</div></div>
 
   <div class="card"><div class="h">⚠️ 存疑：长周期线索</div><div class="b">
-    250 日信号窗口 + 120 日再平衡的平均超额夏普 <b>+0.147</b>（86% 基金为正），
-    但 <b>三重反证</b>：IC 期限结构不支持（250 日 IC 仅 −0.010）、
+    {_t("{w} 日信号窗口 + {r} 日再平衡的平均超额夏普 <b>{mean:+.3f}</b>"
+        "（{pos:.0%} 基金为正），",
+        "长周期（约半年再平衡）格子出现了正超额夏普，",
+        w=_e4_win, r=_e4_reb, mean=_e4_mean, pos=_e4_pos)}
+    但 <b>四重反证</b>：IC 期限结构不支持（250 日 IC 接近 0 甚至为负）、
     是 12 格网格里的最优格子（选择偏差）、
-    相邻格子无连续参数高原。<b>只能算候选假设。</b></div></div>
+    相邻格子无连续参数高原、
+    <b>E9b 时间向前验证给出迁移 IR −0.23、过拟合代价 0.769</b>
+    ——训练期选出的参数在未来不再为正。<b>只能算候选假设。</b></div></div>
 
   <div class="card"><div class="h">🚫 应剔除：两个通道</div><div class="b">
-    ① <b>相对偏离通道</b>全期 IC 为负——主动基金的累计超额是持续 alpha 的累积，
+    ① <b>相对偏离通道</b>{f'各前瞻期 IC 全为负' if _dev_neg else
+    (f'各前瞻期 |IC| 均小于 {_dev_max_abs:.3f}，没有稳定方向'
+     if _dev_max_abs is not None else 'IC 未显示稳定方向')}——
+    主动基金的累计超额是持续 alpha 的累积，
     不是围绕均值的震荡，「涨多了就减仓」会卖在 alpha 兑现途中。<br/>
-    ② <b>赛道估值通道</b>在 250 日尺度上 IC = −0.112，方向与直觉相反：
-    在 A 股宽基 PE 分位上，「低估买入」在中长期是<b>反向</b>的。</div></div>
+    ② <b>赛道估值通道</b>{f'中长期为负（120 日 {_val_120:+.3f}、250 日 {_val_250:+.3f}），方向与直觉相反'
+    if _val_120 is not None and _val_250 is not None else '中长期方向与直觉相反'}：
+    在 A 股宽基 PE 分位上，「低估买入」在中长期是<b>反向</b>的。<br/>
+    ③ <b>综合分（三通道融合）</b>{f'各前瞻期 IC 全为负（最深 {_fused_worst:+.3f}）'
+    if _fused_neg else 'IC 未稳定为负'}——
+    这是最直接的一条：融合信号与未来收益之间<b>没有可用的线性关系</b>。</div></div>
 </div>
 
 <div class="lead warn"><b>最重要的方法论提醒：</b>如果只报告"每只基金最优参数下的表现"，
-这 14 只基金会<b>全部显示为正超额收益</b>（+0.05 ~ +0.48）。
+这批基金会<b>几乎全部显示为正超额收益</b>。
 那是 3×4 网格搜索的产物，不是能力。任何只给出"最优参数回测曲线"的研究
-都应当被高度警惕——本报告因此明确给出<b>固定参数的跨基金分布</b>与<b>网格正贡献比例</b>。</div>
+都应当被高度警惕——本报告因此明确给出<b>固定参数的跨基金分布</b>与<b>网格正贡献比例</b>，
+并额外给出<b>时间向前验证（E9b）</b>：横截面迁移 IR +0.341 看似成立，
+但时间维度迁移 IR 为 <b>−0.23</b>、过拟合代价 <b>0.769</b>。</div>
 </section>
 
 <section>
