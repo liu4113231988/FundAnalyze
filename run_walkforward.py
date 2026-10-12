@@ -131,6 +131,15 @@ def main():
     if res_t.get("ok"):
         res_t["folds"].to_csv(out / "E9b_时间向前验证_逐折.csv",
                               index=False, encoding="utf-8-sig")
+        if "candidates" in res_t and not res_t["candidates"].empty:
+            res_t["candidates"].to_csv(
+                out / "E9b_候选配置明细.csv", index=False,
+                encoding="utf-8-sig")
+        if res_t.get("candidates_by_fund") is not None \
+                and not res_t["candidates_by_fund"].empty:
+            res_t["candidates_by_fund"].to_csv(
+                out / "E9b_候选逐基金IR.csv", index=False,
+                encoding="utf-8-sig")
         pd.DataFrame([{"指标": k, "值": v}
                       for k, v in res_t["summary"].items()]).to_csv(
             out / "E9b_时间向前验证_汇总.csv", index=False, encoding="utf-8-sig")

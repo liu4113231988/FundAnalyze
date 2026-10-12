@@ -322,7 +322,7 @@ def walk_forward_time(per_fund: Dict[str, dict], grid: Optional[List[dict]] = No
         vals = [tb[c][key]["超额夏普"] for c in tb if key in tb[c]]
         return float(np.mean(vals)) if vals else float("nan")
 
-    rows, oos_parts = [], []
+    rows, oos_parts, cand_rows, fund_rows = [], [], [], []
     for fi, (s0, s1, t0, t1) in enumerate(folds, 1):
         tr = _table((s0, s1))
         te = _table((t0, t1))
@@ -352,6 +352,35 @@ def walk_forward_time(per_fund: Dict[str, dict], grid: Optional[List[dict]] = No
             "过拟合代价": (round(oracle - migrated, 3)
                         if np.isfinite(oracle) and np.isfinite(migrated) else np.nan),
         })
+        # ★ 每个候选配置在训练期与测试期的 IR 全部留档（P1-03）：
+        #   没有这份明细，就无法回答"0.317 是选参技能还是抽签运气"。
+        for k in keys:
+            tri, tei = _mean_ir(tr, k), _mean_ir(te, k)
+            cand_rows.append({
+                "折": fi, "配置": f"{k[0]}/{k[1]}",
+                "信号窗口": k[0], "再平衡周期": k[1],
+                "训练集IR": round(tri, 4) if np.isfinite(tri) else np.nan,
+                "测试集IR": round(tei, 4) if np.isfinite(tei) else np.nan,
+                "被训练期选中": (k == best_key),
+                "被测试期选中": (k == oracle_key),
+            })
+            # 逐基金 IR（长表）：选择感知 bootstrap 必须在**基金维度**重采样，
+            # 而不是对 12 个 IR 标量重采样 —— 后者 argmax 几乎必然命中 oracle，
+            # 得到的分布会退化成 oracle 本身，p 值是假的。
+            for c in sorted(te):
+                if k not in te[c]:
+                    continue
+                ex = te[c][k]["excess"].dropna()
+                if len(ex) < 30:
+                    continue
+                sd = float(ex.std(ddof=1))
+                ir_f = (float(ex.mean() * 252) / (sd * np.sqrt(252))
+                        if sd > 1e-9 else np.nan)
+                fund_rows.append({
+                    "折": fi, "配置": f"{k[0]}/{k[1]}",
+                    "基金": c, "测试期IR": ir_f,
+                    "被训练期选中": (k == best_key),
+                })
         for c in te:
             if best_key in te[c]:
                 oos_parts.append(te[c][best_key]["excess"].rename(f"{c}|折{fi}"))
@@ -364,6 +393,8 @@ def walk_forward_time(per_fund: Dict[str, dict], grid: Optional[List[dict]] = No
         "ok": True,
         "检验类型": "外层按时间扩展的时间向前验证（内层仅用训练期选参）",
         "folds": df,
+        "candidates": pd.DataFrame(cand_rows),
+        "candidates_by_fund": pd.DataFrame(fund_rows),
         "oos_excess": oos,
         "summary": {
             "折数": len(df),
