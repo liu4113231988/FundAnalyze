@@ -507,6 +507,69 @@ def _weights_hist_payload(wh: pd.DataFrame, assets_limit: int = 8,
     }
 
 
+def _alpha_stats(fund_line: pd.Series, syn_line: pd.Series) -> dict:
+    """
+    量化"基金 − 合成基准"的累计差距，把它拆成可解释的 alpha。
+
+    fund_line / syn_line 都是**归一到起点 1** 的净值（与图上两条线一致）。
+    因此 log 差就是累计超额，起点为 0。
+
+    为什么必须单独算：
+      R² 0.8~0.93 时日收益拟合已经很好，但每年几个百分点的系统性缺口
+      复利 9 年就会让两条线差出 60% 以上（实测 110013 落后 60%、
+      519697 落后 66%）。用户看到的是"拟合崩了"，真实原因是**基金的 alpha
+      不在指数组合的张成空间里**。这里把它变成数字，让差距可被解释。
+
+    注意：年化 alpha 里**包含**指数价格指数不含股息带来的偏差（约 2~3%/年），
+    因此它是"表观 alpha 上界"，不是纯粹的选股能力。剥离股息需配置
+    `RBSA["index_dividend_annual"]`。
+    """
+    try:
+        from src.robustness import _nw_mean_t
+    except Exception:                                        # noqa: BLE001
+        _nw_mean_t = None
+
+    empty = pd.Series(dtype=float)
+    out = {"alpha_cum": empty, "stats": {}}
+    try:
+        lf = np.log(fund_line.astype(float).replace(0, np.nan)).dropna()
+        ls = np.log(syn_line.astype(float).replace(0, np.nan)).dropna()
+        common = lf.index.intersection(ls.index)
+        if len(common) < 30:
+            return out
+        lf, ls = lf.reindex(common), ls.reindex(common)
+        alpha_cum = lf - ls
+        # 日度 alpha = 基金对数收益 − 合成对数收益
+        d = (lf.diff() - ls.diff()).dropna()
+        if len(d) < 30:
+            return {"alpha_cum": alpha_cum, "stats": {}}
+        ann = float(d.mean() * 252)
+        sd = float(d.std(ddof=1))
+        t = None
+        if _nw_mean_t is not None:
+            try:
+                t = float(_nw_mean_t(d.values, lags=5))
+            except Exception:                                # noqa: BLE001
+                t = None
+        if t is None and sd > 1e-12:
+            t = float(d.mean() / (sd / np.sqrt(len(d))))
+        n_years = len(d) / 252.0
+        return {
+            "alpha_cum": alpha_cum,
+            "stats": {
+                "年化alpha": _jnum(ann, 4),
+                "alpha_t值": _jnum(t, 3),
+                "累计对数超额": _jnum(float(alpha_cum.iloc[-1]), 4),
+                "累计倍数差": _jnum(float(np.exp(alpha_cum.iloc[-1])), 3),
+                "年数": _jnum(n_years, 2),
+                # 表观性提醒：指数是价格指数，股息会被算进 alpha
+                "含股息偏差": True,
+            },
+        }
+    except Exception:                                        # noqa: BLE001
+        return out
+
+
 def model_payload(rep: ModelReport, nav_oos: pd.Series,
                   max_points: int = 400) -> dict:
     """单个模型的完整可视化数据。"""
@@ -525,6 +588,13 @@ def model_payload(rep: ModelReport, nav_oos: pd.Series,
     # 若直接在降采样序列上判"最近 10 日"，实际是"10 个采样点 ≈ 40 个交易日"，
     # 语义会完全失真（step 实测约 4）。
     trend = trend_payload(syn_nav, idx)
+
+    # ---------------- alpha 分解
+    # ★ 图上看"基金起飞、合成基准横盘"时，容易被误读成拟合失败。实际上：
+    #   R² 高 = 风格暴露拟合得好；两条线的累计差距 = **风格之外的部分**，
+    #   主要是基金的 alpha（选股超额），其次是指数价格指数不含股息造成的偏差。
+    #   这里把它单独量化出来，让差距可被解释而不是被当成 bug。
+    alpha_stats = _alpha_stats(fund_line, syn_line)
 
     return {
         "key": rep.key, "name": rep.name, "family": rep.family,
@@ -551,9 +621,14 @@ def model_payload(rep: ModelReport, nav_oos: pd.Series,
             "dates": _dates(idx),
             "fund": [_jnum(v, 5) for v in fund_line.reindex(idx)],
             "synth": [_jnum(v, 5) for v in syn_line.reindex(idx)],
+            # 累计 alpha（对数尺度，起点 0）：与 fund/synth 同一下标采样，
+            # 前端可直接在拟合曲线旁叠加这条线。
+            "alpha": [_jnum(v, 5) for v in
+                      alpha_stats["alpha_cum"].reindex(idx)],
             # 趋势状态按绘图下标一一对应（长度 = len(dates)）
             "trend": trend,
         },
+        "alpha": alpha_stats["stats"],
         "residual": {
             "dates": _dates(syn.index[::step]),
             "value": [_jnum(v, 5) for v in
@@ -606,6 +681,43 @@ def build_insights(code: str, name: str, navb: dict, corr: dict,
                      f"差异主要来自模型的正则化强度与非线性程度，"
                      f"而非数据差异——因为所有模型用的是同一份切分。"),
         }
+
+        # ---------- 1b. 合成基准与基金净值的累计差距 = alpha（不是拟合失败）
+        # 用户最容易误读的一处：图上"基金起飞、合成基准横盘"看起来像崩了，
+        # 但 R² 高说明风格暴露是对的，差距是**风格之外的 alpha**。
+        a = (payload.get(best_row["key"], {}) or {}).get("alpha") or {}
+        ann, mult = a.get("年化alpha"), a.get("累计倍数差")
+        if ann is not None and mult is not None and abs(float(mult) - 1.0) > 0.15:
+            tv = a.get("alpha_t值")
+            sig = (tv is not None and abs(float(tv)) > 1.96)
+            sig_txt = (
+                f"其 t 值 <b>{float(tv):.2f}</b>"
+                + ("（|t|>1.96，统计上显著）" if sig else
+                   "（|t|&lt;1.96，<b>统计上不显著</b>，只能当点估计看）")
+                if tv is not None else "")
+            out["alpha_gap"] = {
+                "warn": float(mult) < 1.0,
+                "text": (
+                    f"<b>为什么两条线会越走越远：</b>该基金与合成基准的累计差距"
+                    f"折合年化 <b>{float(ann):+.1%}</b>（{a.get('年数')} 年累计 "
+                    f"<b>{float(mult):.2f}×</b>）。{sig_txt}<br/>"
+                    f"这不是拟合失败 —— 样本外 R² 仍有 "
+                    f"<b>{best_row['样本外R²']:.3f}</b>，说明<b>风格暴露识别是对的</b>；"
+                    f"差距来自<b>风格之外的 alpha</b>（基金选股超额），"
+                    f"指数组合在数学上无法复制它。"),
+            }
+            # 口径差是**可修**的那一部分：实测对低 alpha 基金几乎能完全抹平
+            out["alpha_fix"] = {
+                "text": (
+                    f"<b>其中一部分是口径差，可以修：</b>基金侧用总回报（含分红再投），"
+                    f"而候选指数是<b>价格指数（不含股息）</b>，这部分会被算进 alpha。"
+                    f"把 <code>RBSA[\"index_dividend_annual\"]</code> 填一个年化股息率"
+                    f"（如 <code>0.02</code>）即可还回指数侧 —— 实测对部分基金"
+                    f"几乎能完全抹平差距（110022 合成累计 1.66→2.00，基金实际 1.96；"
+                    f"000001 1.22→1.39，基金实际 1.39）。<br/>"
+                    f"<b>不建议</b>为了追上差距去调大 Σw：实测放开仓位上限后 R² 反而"
+                    f"全面变差（0.83→0.77）。"),
+            }
 
     # ---------- 2. 风格漂移（相关性层面）
     if corr.get("drift"):

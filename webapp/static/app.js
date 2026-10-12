@@ -1048,14 +1048,26 @@ function drawCurve(m) {
       });
     }
   }
+  // ★ 累计 alpha（log 尺度，起点 0）画在右轴：它回答"两条线为什么越走越远"。
+  //   没有它，用户会把 alpha 积累误读成拟合失败。
+  const hasAlpha = Array.isArray(d.alpha) && d.alpha.some(v => v !== null && !isNaN(v));
+  const legendData = hasAlpha ? ['基金净值', '合成基准', '累计alpha(右轴)']
+                              : ['基金净值', '合成基准'];
   chart('chartCurve', {
-    grid: { left: 52, right: 18, top: 18, bottom: 34 },
+    grid: { left: 52, right: hasAlpha ? 58 : 18, top: 18, bottom: 34 },
     tooltip: { trigger: 'axis', backgroundColor: '#1b2431', borderColor: '#2f3b4d',
       textStyle: { color: '#e6edf6', fontSize: 12 } },
-    legend: { data: ['基金净值', '合成基准'], textStyle: { color: '#a9b6c8', fontSize: 11 },
+    legend: { data: legendData, textStyle: { color: '#a9b6c8', fontSize: 11 },
       top: 0, itemWidth: 16, itemHeight: 8 },
     xAxis: { type: 'category', data: d.dates, ...AX, axisLabel: { ...AX.axisLabel, hideOverlap: true } },
-    yAxis: { type: 'value', scale: true, ...AX, axisLabel: { ...AX.axisLabel, formatter: v => v.toFixed(2) } },
+    yAxis: [
+      { type: 'value', scale: true, ...AX, axisLabel: { ...AX.axisLabel, formatter: v => v.toFixed(2) } },
+      ...(hasAlpha ? [{
+        type: 'value', scale: true, ...AX, position: 'right',
+        splitLine: { show: false },
+        axisLabel: { ...AX.axisLabel, formatter: v => (v >= 0 ? '+' : '') + v.toFixed(2) },
+      }] : []),
+    ],
     dataZoom: [{ type: 'inside' }, { type: 'slider', height: 15, bottom: 4,
       borderColor: '#2f3b4d', fillerColor: 'rgba(74,158,255,.12)',
       handleStyle: { color: '#4a9eff' }, textStyle: { color: '#6f7f96', fontSize: 9 } }],
@@ -1078,6 +1090,12 @@ function drawCurve(m) {
           label: { show: false },
           tooltip: { formatter: (p) => p.data.value },
         } },
+      ...(hasAlpha ? [{
+        name: '累计alpha(右轴)', type: 'line', data: d.alpha,
+        yAxisIndex: 1, showSymbol: false,
+        lineStyle: { width: 1.2, color: '#f0a020', type: 'dotted' },
+        areaStyle: { opacity: 0.06, color: '#f0a020' },
+      }] : []),
     ]
   });
 }

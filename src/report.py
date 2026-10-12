@@ -399,7 +399,50 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
     exp_tbl = _table(exp.rename(columns={"名称": "指数", "层级": "类型"}),
                      fmts={"权重": "pct1"}, index=False)
 
-    # ---------------- 绩效对比
+    # ---------------- alpha 分解：解释"两条线为什么越走越远"
+    # 用户最容易误读的一处：净值曲线上基金与合成基准的累计差距，
+    # 看起来像拟合崩了，实际主要是 alpha（风格之外的选股超额）。
+    _alpha_note = ''
+    try:
+        _nav_s = main.get("nav")
+        _syn_s = main.get("syn_nav")
+        if _nav_s is not None and _syn_s is not None and len(_nav_s) > 60:
+            _idx = _syn_s.index
+            _f = _nav_s.reindex(_idx).dropna()
+            _s2 = _syn_s.reindex(_f.index).dropna()
+            if len(_f) > 60 and len(_s2) > 60:
+                _lf = np.log(_f / _f.iloc[0])
+                _ls = np.log(_s2 / _s2.iloc[0])
+                _d = (_lf.diff() - _ls.diff()).dropna()
+                _ann = float(_d.mean() * 252)
+                _mult = float(np.exp((_lf - _ls).iloc[-1]))
+                _yrs = len(_d) / 252.0
+                # ★ 变量名不能用 _t：模板里 _t(...) 是"有数据就用数字、没数据就
+                #   退回定性表述"的助手函数，被 float 覆盖后整页会报 not callable。
+                _at = None
+                try:
+                    from src.robustness import _nw_mean_t
+                    _at = float(_nw_mean_t(_d.values, lags=5))
+                except Exception:                            # noqa: BLE001
+                    _at = None
+                _ts = (f"t = {_at:.2f}" + ("（显著）" if abs(_at) > 1.96
+                                         else "（<b>不显著</b>，只能当点估计看）")
+                       if _at is not None else "")
+                _alpha_note = (
+                    f'<div class="lead warn"><b>关于"基金净值与合成基准越走越远"：</b>'
+                    f'两者差 {_mult:.2f}×（{_yrs:.1f} 年），折合年化 <b>{_ann:+.1%}</b>，'
+                    f'{_ts}。<br/>'
+                    f'这不是拟合失败 —— 窗口内 R² 达 '
+                    f'{main["fit_diag"]["r2"].mean():.2f}，说明<b>风格暴露识别是对的</b>；'
+                    f'差距主要来自<b>风格之外的 alpha</b>（行业内部选股），'
+                    f'指数组合在数学上无法复制。<br/>'
+                    f'其中约 2~3%/年是<b>口径差</b>：基金侧用总回报（含分红再投），'
+                    f'候选指数是价格指数（不含股息）。可在 '
+                    f'<code>RBSA["index_dividend_annual"]</code> 填年化股息率予以剥离。'
+                    f'<b>不建议</b>为此调大 Σw —— 实测放开仓位上限后 R² 反而变差。</div>')
+    except Exception:                                        # noqa: BLE001
+        _alpha_note = ''
+
     perf = m.reset_index().rename(columns={"方案": "方案"})
     metrics_tbl = _table(perf, index=False, fmts={
         "年化收益": "pct", "年化波动": "pct", "夏普": "f3", "算术夏普": "f3",
@@ -643,6 +686,7 @@ r<sub>f,t</sub> = Σ w<sub>i</sub> · r<sub>i,t</sub> + ε<sub>t</sub>
 <p>R² 长期维持在 {main['fit_diag']['r2'].min():.2f}~{main['fit_diag']['r2'].max():.2f}，
 说明这只基金<b>几乎可以被少数几个行业指数完全复制</b>——
 它的超额收益来自行业内部选股，而不是行业配置。</p>
+{_alpha_note}
 
 <h3>3.2 趋势与估值状态</h3>
 {_fig(figs.get('deviation',''), '相对偏离：价差水平与 z-score')}

@@ -980,6 +980,16 @@ class ModelZoo:
         X_all = R[assets].values
         y_all = R[fund_col].values
 
+        # ★ 指数股息调整（P0-01 遗留 / alpha 分解配套）
+        #   基金侧现在是**总回报**（含分红再投），而候选指数是**价格指数**
+        #   （不含成分股股息）。这个口径差全部落进残差、被当成 alpha，
+        #   实测约 2~3%/年，复利 9 年就是 20~30% 的"伪 alpha"。
+        #   填 `RBSA["index_dividend_annual"]` 即可把它还回指数侧；
+        #   默认 0 = 保持原行为，不改变任何现有结果。
+        div = float(cfg.get("index_dividend_annual", 0.0) or 0.0)
+        if abs(div) > 1e-9:
+            X_all = X_all + div / 252.0
+
         n = len(dates)
         W = cfg["window"]
         if n < W + 60:
