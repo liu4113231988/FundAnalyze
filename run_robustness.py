@@ -37,9 +37,10 @@ from src.signal import SignalEngine, build_decision
 pd.set_option("display.width", 200)
 
 
-def _report(res: dict) -> None:
+def _report(res: dict, label: str = "") -> None:
     print("\n" + "=" * 96)
-    print(f"E7 · 稳健性检验（{res['label']}）")
+    # assess_signal_edge 的返回里没有 label 字段，必须给个默认值
+    print(f"E7 · 稳健性检验（{res.get('label') or label or '策略'}）")
     print("=" * 96)
     if not res.get("ok"):
         print("失败：", res.get("diag"))
@@ -89,14 +90,19 @@ def _report(res: dict) -> None:
         print("  （有效基金数不足 120 个观测，跳过）")
 
     pf = res["per_fund"]
+    # assess_positions 与 assess_signal_edge 的 diag 键名不同，两种都要兼容
+    poscol = next((c for c in ("平均仓位", "avg_pos") if c in pf.columns), None)
+    trncol = next((c for c in ("换手",) if c in pf.columns), None)
     print("\n[结论]")
     print(f"  · 有效独立样本量只有 {eff['n_eff']:.1f} 个"
           f"（第一主成分解释 {eff['pc1_share']:.0%}）")
     if fac:
         print(f"  · NW t 显著的只有 {fac['n_sig']}/{fac['n_total']} 只")
     print(f"  · bootstrap p = {b['p_value']:.3f}（{v}）")
-    print(f"  · 平均仓位 {pf['平均仓位'].mean():.1%}"
-          f"，年化换手 {pf['换手'].mean():.2f}x")
+    if poscol:
+        print(f"  · 平均仓位 {pf[poscol].mean():.1%}")
+    if trncol:
+        print(f"  · 年化换手 {pf[trncol].mean():.2f}x")
 
 
 def main():
@@ -164,7 +170,7 @@ def main():
     # sharpe_diff_geometric / ann_diff_geometric，正好用来量化
     # "把几何夏普差换成 IR 口径，结论变了多少"（P1-10 / P0-07）。
     res_se = assess_signal_edge(nav_by, syn_by, panel, wt_by)
-    _report(res_se)
+    _report(res_se, label="E4 低频再平衡（250/120）")
     if res_se.get("ok"):
         res_se["per_fund"].to_csv(out / "E7_稳健性_E4低频_逐基金.csv",
                                   encoding="utf-8-sig")
