@@ -867,7 +867,11 @@ def _guess_name(code: str) -> Optional[str]:
     nm, listed = None, False        # listed = 名录**成功拉取**（区分网络失败）
     try:
         import akshare as ak
-        info = ak.fund_name_em()
+        # ★ 复查发现：这是唯一没走 _retry/http_timeout 的网络调用点 ——
+        #   /api/name 和分析首屏都会走到它，挂起会把请求线程卡死。
+        from src.data import http_timeout
+        with http_timeout():
+            info = ak.fund_name_em()
         listed = True
         col = "基金代码" if "基金代码" in info.columns else info.columns[0]
         namecol = next((c for c in ("基金简称", "名称", "基金名称")

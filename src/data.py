@@ -281,6 +281,11 @@ def calibrate_total_return(cum_nav: pd.Series, unit_nav: pd.Series,
                    .ffill().bfill())
             sc = sc.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(1.0)
             F = F * sc
+        elif len(anchors) >= 2:
+            # ★ 复查发现：锚点存在但全部落在净值区间之外时，这里会**静默**
+            #   跳过校准，返回只有分红修正的 F —— 使用者无从知道口径降级了。
+            print(f"[data] ⚠ 累计收益率锚点 {len(anchors)} 个全部落在净值区间"
+                  f" [{idx[0].date()} ~ {idx[-1].date()}] 之外，拆分校准未生效")
     F = F.clip(lower=1e-8)
     F.name = "total_return"
     return F
@@ -291,13 +296,19 @@ def fetch_fund_total_return(code: str,
     """
     日频**总回报**净值（含分红再投，起点 1.0）—— 收益分析的正确口径。
 
-    需要 3 次接口调用（累计净值 / 单位净值 / 累计收益率）。若任一失败，
-    退化为累计净值直算并打印警告（绝不像旧实现那样静默使用错口径）。
+    需要 3 次接口调用（累计净值 / 单位净值 / 累计收益率）。
+
+    ★ 退化行为（P0-01 / 复查发现）：无法构造总回报时，本函数会在返回的
+    Series 上标记 `attrs["degraded"] = True`，而**不再静默退回 cum**——
+    旧实现把 cum 结果原样返回，调用方 `load_fund_nav_cached` 会把它写进
+    `_total` 后缀的缓存名下（meta 还标着 basis="total"），之后所有读取
+    持续命中这份口径错误的缓存，且无从察觉。
     """
     cum = _fetch_nav(code, "累计净值走势", start)
     unit = fetch_fund_unit_nav(code, start)
     if cum.empty or unit.empty:
         print(f"[data] ⚠ {code} 拿不到单位净值，退回累计净值口径（P0-01 未修正）")
+        cum.attrs["degraded"] = True
         return cum
     rr = fetch_cum_return_curve(code, start)
     if rr.empty:
@@ -308,8 +319,14 @@ def fetch_fund_total_return(code: str,
         r.iloc[0] = 0.0
         F = (1.0 + r).cumprod()
         F.name = "total_return"
+        F.attrs["degraded"] = True          # 拆分未校准，仍是部分口径
         return F.clip(lower=1e-8)
-    return calibrate_total_return(cum, unit, rr)
+    F = calibrate_total_return(cum, unit, rr)
+    if F.empty:
+        print(f"[data] ⚠ {code} 总回报构造结果为空，退回累计净值口径")
+        cum.attrs["degraded"] = True
+        return cum
+    return F
 
 
 def verify_nav_basis(code: str, start: Optional[str] = None) -> dict:
@@ -735,12 +752,27 @@ def load_fund_nav_cached(fund_code: str, start: str = C.START_DATE,
             if p.exists():
                 p.unlink()
 
+    class _DegradedNav(Exception):
+        """总回报口径不可用。绝不能把退化结果写进 total 缓存名下。"""
+
     def build() -> pd.DataFrame:
         if basis == NAV_BASIS_TOTAL:
-            return fetch_fund_total_return(fund_code, start).to_frame()
+            s = fetch_fund_total_return(fund_code, start)
+            # ★ 复查发现的缓存污染：旧实现把退回的 cum 序列原样返回，
+            #   _cached 会把它写进 `_total` 后缀的缓存名（meta 还标
+            #   basis="total"），之后所有读取持续命中口径错误的缓存。
+            #   这里显式拒绝：退回结果只本次内存使用，不落盘。
+            if bool(getattr(s, "attrs", {}).get("degraded")):
+                raise _DegradedNav(
+                    f"{fund_code} 无法构造总回报口径（单位净值或累计收益率锚点缺失）")
+            return s.to_frame()
         return fetch_fund_nav(fund_code, start).to_frame()
 
-    df = _cached(cache_name, build, meta=meta)
+    try:
+        df = _cached(cache_name, build, meta=meta)
+    except _DegradedNav as e:
+        print(f"[data] ⚠ {e}；本次退回累计净值口径，结果【未缓存】")
+        return fetch_fund_nav(fund_code, start)
     s = df.iloc[:, 0] if isinstance(df, pd.DataFrame) else df
     s.name = f"fund_{fund_code}"
     return s

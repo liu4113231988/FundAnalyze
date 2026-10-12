@@ -256,6 +256,42 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
 
     _dev_neg = None
     _dev_max_abs = None
+    # ---- E9b / 功效 / 增量 / 选择感知：全部从 CSV 证据取数（复查发现报告里
+    #      这些数字仍是硬编码，口径一变就会再次过期）
+    _ev = (extra_meta or {}).get("evidence") or {}
+    _e9b = _ev.get("e9b") or {}
+    _e9b_mig = _e9b.get("迁移配置在测试期均值IR")
+    _e9b_cost = _e9b.get("参数选择过拟合代价")
+    _osp = _ev.get("overfit_split")
+    if isinstance(_osp, pd.DataFrame) and not _osp.empty and "运气部分(oracle−均值)" in _osp.columns:
+        _tot = float(pd.to_numeric(_osp["总代价(oracle−迁移)"], errors="coerce").mean())
+        _luck = float(pd.to_numeric(_osp["运气部分(oracle−均值)"], errors="coerce").mean())
+        _over = float(pd.to_numeric(_osp["过拟合部分(均值−迁移)"], errors="coerce").mean())
+        _luck_pct = round(_luck / _tot * 100) if _tot else None
+        _over_pct = round(_over / _tot * 100) if _tot else None
+    else:
+        _luck_pct = _over_pct = None
+    _power = _ev.get("power")
+    _incr = _ev.get("increment")
+    _mc = _ev.get("multiplicity")
+    # ★ _t() 的参数是急切求值的：f"{None:+.3f}" 会先崩，所以先把数字
+    #   格式化成字符串（或 None），再交给 _t 挑选。
+    _e9b_mig_s = (f"{float(_e9b_mig):+.3f}"
+                  if isinstance(_e9b_mig, (int, float))
+                  and np.isfinite(_e9b_mig) else None)
+    _e9b_cost_s = (f"{float(_e9b_cost):+.3f}"
+                   if isinstance(_e9b_cost, (int, float))
+                   and np.isfinite(_e9b_cost) else None)
+    _luck_s = f"{_luck_pct}%" if _luck_pct is not None else None
+    _over_s = f"{_over_pct}%" if _over_pct is not None else None
+    _evidence_tables_html = ""
+
+    def _ev_table(df, note=""):
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return ""
+        return _table(df.round(4), index=False) + (
+            f'<p class="muted">{note}</p>' if note else "")
+
     if isinstance(_e1, pd.DataFrame) and _e1_cols:
         row = _e1[_e1["信号"] == "相对偏离通道"]
         if not row.empty:
@@ -305,6 +341,37 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
     else:
         fingerprint_html = ('<p class="muted">本次运行未提供指纹'
                             '（build_report.py 未传 fingerprint）。</p>')
+
+    # ---------------- 第 09 节：增量 / 功效 / 选择过程证据（从产物 CSV 渲染）
+    _ev_parts = []
+    if isinstance(_power, pd.DataFrame) and not _power.empty:
+        _ev_parts.append(
+            "<h3>功效分析（P0-06）</h3>"
+            "<p>α=0.05 双侧、目标功效 80%、δ=|mean(IR)|/sd(IR)。" 
+            "「所需基金数」假设扩池不改变相关结构 —— 这只是下界。</p>"
+            + _ev_table(_power))
+    if isinstance(_incr, pd.DataFrame) and not _incr.empty:
+        _cols = [c for c in ("基金", "名称", "A_单一宽基MSE_R2",
+                             "D_受约束回归_R2", "R2增量_D减A",
+                             "A_单一宽基MSE_稳定", "D_受约束回归_稳定")
+                 if c in _incr.columns]
+        if _cols:
+            _ev_parts.append(
+                "<h3>风格画像 vs 单一宽基（P2-02，事前公平比较）</h3>"
+                + _ev_table(_incr[_cols]))
+    if isinstance(_mc, pd.DataFrame) and not _mc.empty:
+        _ev_parts.append(
+            "<h3>多重比较校正（P1-03）</h3>" + _ev_table(_mc))
+    if isinstance(_osp, pd.DataFrame) and not _osp.empty:
+        _ev_parts.append(
+            "<h3>过拟合代价拆解（P1-03）</h3>"
+            "<p>运气部分不是过拟合：从 12 个候选里挑最大值本身就会偏高。</p>"
+            + _ev_table(_osp))
+    evidence_html = ("".join(_ev_parts)
+                     if _ev_parts else
+                     '<p class="muted">本次运行未提供 P0-06 / P2-02 / P1-03 的'
+                     '证据产物（先跑 run_power.py / run_increment.py / '
+                     'run_selection.py，再重新生成报告）。</p>')
 
     # ---------------- 头部 KPI
     kpis = [
@@ -494,11 +561,11 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
     但 <b>四重反证</b>：IC 期限结构不支持（250 日 IC 接近 0 甚至为负）、
     是 12 格网格里的最优格子（选择偏差）、
     相邻格子无连续参数高原、
-    <b>E9b 时间向前验证给出迁移 IR −0.23</b>
+    <b>E9b 时间向前验证给出迁移 IR {_t(_e9b_mig_s, "为负（详见 E9b 输出）", v=_e9b_mig_s)}</b>
     ——训练期选出的参数在未来不再为正。<b>只能算候选假设。</b><br/>
-    <span style="font-size:12px;color:#64748b">注意别把"过拟合代价 0.769"读成
-    "参数选择过拟合"：拆解后其中 <b>115% 来自"从 12 个候选里挑最大值"的抽签运气，
-    真实过拟合为 −15%</b>（即训练期选择相对平均水平甚至略好）。
+    <span style="font-size:12px;color:#64748b">注意别把"过拟合代价 {_t(_e9b_cost_s, '0.77', v=_e9b_cost_s)}"读成
+    "参数选择过拟合"：拆解后其中 <b>{_t(_luck_s, '大部分', v=_luck_s)} 来自"从 12 个候选里挑最大值"的抽签运气，
+    真实过拟合为 {_t(_over_s, '很小甚至为负', v=_over_s)}</b>（即训练期选择相对平均水平甚至略好）。
     真正的问题是<b>整个候选集在测试期的 IR 均值为负</b>，不是选参选错了。</span></div></div>
 
   <div class="card"><div class="h">🚫 应剔除：两个通道</div><div class="b">
@@ -520,8 +587,10 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
 那是 3×4 网格搜索的产物，不是能力。任何只给出"最优参数回测曲线"的研究
 都应当被高度警惕——本报告因此明确给出<b>固定参数的跨基金分布</b>与<b>网格正贡献比例</b>，
 并额外给出<b>时间向前验证（E9b）</b>：横截面迁移 IR +0.341 看似成立，
-但时间维度迁移 IR 为 <b>−0.23</b>；且该代价里 115% 是挑最大值的运气，
-真实过拟合为 −15% —— 问题在候选集整体为负，不在选参。</div>
+但时间维度迁移 IR 为 {_t('<b>' + _e9b_mig_s + '</b>' if _e9b_mig_s else '负值', '负值', v=_e9b_mig_s)}；
+且该代价里 {_t(_luck_s, '大部分', v=_luck_s)} 是挑最大值的运气，
+真实过拟合为 {_t(_over_s, '很小甚至为负', v=_over_s)}
+—— 问题在候选集整体为负，不在选参。</div>
 </section>
 
 <section>
@@ -679,6 +748,11 @@ ICIR = {_safe(main['backtest']['icir'], '.2f')}，
 <section>
 <h2><span class="n">08</span>运行指纹（可复现性）</h2>
 {fingerprint_html}
+</section>
+
+<section>
+<h2><span class="n">09</span>增量、功效与选择过程证据</h2>
+{evidence_html}
 </section>
 
 <footer>

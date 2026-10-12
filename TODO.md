@@ -121,7 +121,7 @@
 | **N-05** | 删除模块级 `socket.setdefaulttimeout`，改为 `http_timeout()` 上下文管理器，仅在 `_retry` 的抓取段内生效 | 语法 + 冒烟 |
 | **N-06** | **更正原判断**：`RBSA.fit_rolling` 传的是 `max_rebal=None`（不抽稀），研究路径前缀**本来**就稳定；会漂移的只有 Web 抽稀模式。因此在 `webapi` meta 中如实记录 `rebal_mode` / `prefix_stable`，config 注释同步更正 | 见 `src/config.py` 注释 |
 | **N-07** | `_cached` 自动写入 info（抓取时间 / 数据起末日 / 行数列数）；新增 `cache_info()` 与 `_cache_info_write()`；`_cache_meta_valid` 改为只比较指纹字段（info 不参与判等，否则缓存每次全失效）；`load_index_universe` 无条件记录 `missing_assets` 并对缺失告警 | 冒烟：二次加载命中缓存、info 含 data_end |
-| **N-08** | `JobStore` 增加 15 分钟墙钟超时清扫（旧实现 running 永不超时，卡死会永久占满并发闸门）、`cancel()` / `is_cancelled()`、`find_running()` 相同任务合并（`/api/analyze` 返回 `merged: true`） | 冒烟：合并/超时/取消三项 |
+| **N-08** | `JobStore` 增加 15 分钟墙钟超时清扫（旧实现 running 永不超时，卡死会永久占满并发闸门）、`find_running()` 相同任务合并（`/api/analyze` 返回 `merged: true`） | 冒烟：合并/超时两项 |
 | **N-09** | 新增 `src/runinfo.py`：git commit / Python / 依赖版本 / 数据指纹 / 配置快照 / 种子；`build_report.py` 落盘 `run_fingerprint.json` 并在报告新增「08 运行指纹」节 | 冒烟：git=825755f、47 候选 |
 | **N-10** | **发现并修复真实缺陷**：`fit_health_channel` 的 `reindex(method="ffill")` 会把 NaN R² 传播成上一个窗口的值，失效窗口被静默掩盖；改为显式还原 NaN，`fit_reliable` 对 NaN 给 0（判不可信） | **R11** |
 
@@ -143,6 +143,9 @@
   第一版实现对 12 个 IR 标量重采样，bootstrap 分布退化成 oracle 本身（中位数 ==
   95% 分位 == oracle），p 值是假的；已改为基金维度重采样。
 | **N-11（新）** | Web 首屏若也要前缀稳定，把 `C.RBSA["rebal_mode"]` 改成 `"calendar"` | 会改变首屏结果，需连同 `CACHE_VERSION` +1；研究路径本就不抽稀、不受影响 |
+| **N-12（新，第五轮复查）** | `JobStore.cancel`/`is_cancelled` 已实现但**没有任何路由与前端调用**（死接口）；`verify_nav_basis` 已接通 `run_verify_basis.py`；`total_return_index` 保留为已知答案测试的基础（akshare 拿不到分红事件，事件驱动路径暂不可用） | 取消功能需要加 `/api/cancel/<jid>` 路由 + worker 内检查点 + 前端按钮 |
+| **N-13（新，第五轮复查）** | README「主要实验结论」整段旧口径数字曾与新口径并存；已加标注并改写结论。剩余旧口径残留需逐节清理 `docs/研究方案.md`（E6 口径警示框已加） | 文档量大，逐节核对 |
+| **N-14（新，第五轮复查）** | 报告新增第 09 节（功效/增量/选择感知/拆解四表），E9b 数字全部数据驱动；`rank_percentile` 并列采用保守口径（严格小于），已在 docstring 声明 | —（已完成，留档） |
 
 ### 第四轮已完成（2026-10-12，网络可用后）
 

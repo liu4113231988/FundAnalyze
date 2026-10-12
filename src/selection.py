@@ -70,6 +70,10 @@ def rank_percentile(cand: pd.DataFrame, fold: Optional[int] = None
     指标 1：被训练期选中的配置，其测试期 IR 在候选中的百分位排名。
 
     cand 需含列：折 / 配置 / 训练集IR / 测试集IR / 被训练期选中。
+
+    ★ 并列口径：用 `others < picked`（严格小于），即并列的对手**不计入**
+    高于自己的部分。这是保守口径 —— 并列最高时百分位 < 100%。
+    若想按"不超过自己"计，用 `others <= picked`。
     """
     d = cand if fold is None else cand[cand["折"] == fold]
     rows = []

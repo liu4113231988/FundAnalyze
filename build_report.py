@@ -121,27 +121,68 @@ def main():
             "median": float(e3["超额夏普"].median()),
         }
 
-    # 跨基金结论文字
+    # ---- 新证据纳入报告（复查发现：P0-06/P2-02/P1-03 的产物完全没进 HTML，
+    #      E9b 的数字还是硬编码 —— 又一次"代码已修、文档引用旧数"）。
+    # ★ 必须在 verdict 构造**之前**读取，否则 verdict 只能继续硬编码。
+    def _read_json_cols(name, keys):
+        fp = C.RES_DIR / name
+        if not fp.exists():
+            return None
+        try:
+            d = pd.read_csv(fp)
+            out = {}
+            for k in keys:
+                if k in d.columns:
+                    out[k] = d[k].iloc[0]
+            return out or None
+        except Exception as e:                                # noqa: BLE001
+            print(f"[warn] 读取 {name} 失败: {e}")
+            return None
+
+    # E9b 汇总是**长格式**（指标/值 两列），不是宽格式
+    _e9b_df = read_csv_safe("E9b_时间向前验证_汇总.csv")
+    e9b = None
+    if _e9b_df is not None and {"指标", "值"}.issubset(_e9b_df.columns):
+        e9b = dict(zip(_e9b_df["指标"], pd.to_numeric(_e9b_df["值"],
+                                                      errors="coerce")))
+    mc = read_csv_safe("E7_稳健性_多重比较.csv")
+    p006 = read_csv_safe("P0-06_功效分析.csv")
+    p202 = read_csv_safe("P2-02_增量价值分析.csv")
+    p103 = read_csv_safe("P1-03_过拟合代价拆解.csv")
+    evidence = {
+        "e9b": e9b, "multiplicity": mc, "power": p006,
+        "increment": p202, "overfit_split": p103,
+    }
+
+    # 跨基金结论文字（E9b 数字从上面的 evidence 取，不再硬编码）
     if not summary.empty and "净贡献_夏普" in summary.columns:
         v = summary["净贡献_夏普"].astype(float)
         n = len(v)
         pos = int((v > 0).sum())
         rk = float(summary["RankIC"].astype(float).mean()) if "RankIC" in summary.columns else float("nan")
+        _mig = e9b.get("迁移配置在测试期均值IR") if e9b else None
+        _cost = e9b.get("参数选择过拟合代价") if e9b else None
+        _mig_s = (f"{float(_mig):+.3f}"
+                  if _mig is not None and np.isfinite(_mig) else "负值")
+        _cost_s = (f"{float(_cost):+.3f}"
+                   if _cost is not None and np.isfinite(_cost) else "")
         verdict = (f"14 只不同风格基金的检验结果：默认参数下超额夏普为正的仅 {pos}/{n} 只"
                    f"（{pos/n:.0%}），均值 {v.mean():+.4f}，中位数 {v.median():+.4f}，"
                    f"RankIC 均值 {rk:+.4f}。"
                    f"<b>结论高度一致——这套日频信号不创造择时价值，且方向轻微为负。</b>"
                    f"长周期格子虽出现正超额夏普，但存在选择偏差、缺少 IC 层面支撑，"
-                   f"且 <b>E9b 时间向前验证的迁移 IR 为 −0.23、过拟合代价 0.769</b>"
-                   f"——训练期选出的参数在未来不再为正，"
-                   f"只能作为<b>待验证的候选假设</b>，不能视为已证实的效应。")
+                   f"且 <b>E9b 时间向前验证的迁移 IR 为 {_mig_s}"
+                   + (f"、过拟合代价 {_cost_s}" if _cost_s else "")
+                   + "</b>——训练期选出的参数在未来不再为正，"
+                     "只能作为<b>待验证的候选假设</b>，不能视为已证实的效应。")
     else:
         verdict = ""
 
-    meta = {
+    meta_extra = {
         "n_funds": f"{len(summary)}" if not summary.empty else "4",
         "period": f"{main_res['nav'].index[0].date()} ~ {main_res['nav'].index[-1].date()}",
         "cross_fund_verdict": verdict,
+        "evidence": evidence,
     }
 
     # ---- 运行指纹（P1-09 / N-09）：结论必须能回答"是在哪套环境/数据/参数下跑的"
@@ -155,8 +196,8 @@ def main():
     for ln in fingerprint_lines(fp):
         print(ln)
 
-    path = build_report(main_res, summary, experiments, figs, extra_meta=meta,
-                        fingerprint=fp)
+    path = build_report(main_res, summary, experiments, figs,
+                        extra_meta=meta_extra, fingerprint=fp)
     print(f"[report] 完成：{path}")
 
 
