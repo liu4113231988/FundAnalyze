@@ -130,6 +130,48 @@ def _check_params(params):
                 raise ValueError(f"params[{m}][{k}] 必须是有限数值")
     return params
 
+
+def _parse_window(start=None, end=None, min_days=None, today=None):
+    """
+    校验分析/回测区间，返回 (start, end)，均为 "YYYY-MM-DD" 或 None。
+
+    ★ 为什么有 2 年下限（C.MIN_WINDOW_DAYS）
+    --------------------------------------
+    不是随手定的。多模型评估本身需要 ≥312 个交易日，再叠加回测窗口需要 ≥372；
+    拟合还要吃掉一个滚动窗口（252 日）做预热。1 年样本（≈244 交易日）连
+    一个完整窗口都撑不起来 —— 跑出来的"风格画像"只是噪声。
+    2 年 ≈ 488 交易日，warmup 后仍剩 ~236 天可用，是可行的下限。
+
+    上限不做限制：太长不会算错，只是结论会混入过多历史状态（这也是把默认
+    窗口从 10 年改成 5 年的原因），前端会给出提示而不是硬拦。
+    """
+    min_days = int(C.MIN_WINDOW_DAYS if min_days is None else min_days)
+
+    def _d(x, label):
+        if x is None or (isinstance(x, str) and not str(x).strip()):
+            return None
+        try:
+            return pd.Timestamp(str(x).strip()).normalize()
+        except (ValueError, TypeError):
+            raise ValueError(f"{label}日期格式应为 YYYY-MM-DD，收到 {x!r}")
+
+    s, e = _d(start, "起始"), _d(end, "结束")
+    if s is not None and e is not None and s >= e:
+        raise ValueError(f"起始日 {s.date()} 需早于结束日 {e.date()}")
+    # end 省略 = 取到最新，此时用今天兜底才能判长度
+    e_eff = e if e is not None else pd.Timestamp(
+        today if today is not None else time.strftime("%Y-%m-%d")).normalize()
+    if s is not None:
+        days = int((e_eff - s).days)
+        if days < min_days:
+            raise ValueError(
+                f"分析区间只有 {days} 天（约 {days / 365.25:.1f} 年），"
+                f"最短需 {min_days} 天（{C.MIN_WINDOW_YEARS} 年）。"
+                f"样本太短时拟合窗口与预热会吃掉大部分数据，"
+                f"得到的风格画像不可靠。")
+    return (s.strftime("%Y-%m-%d") if s is not None else None,
+            e.strftime("%Y-%m-%d") if e is not None else None)
+
 # 已完成/失败任务在内存中的保留时间；过期后整任务清除（分析结果磁盘缓存仍在）
 JOB_TTL_SEC = 30 * 60
 
@@ -861,8 +903,16 @@ def analyze(code: str, models: Optional[List[str]] = None,
             params: Optional[dict] = None, refresh: bool = False,
             job_id: Optional[str] = None,
             max_rebal: Optional[int] = None,
-            auto_equity: bool = True) -> dict:
-    """完整分析流程。models 为空表示全部 11 个模型。"""
+            auto_equity: bool = True,
+            start: Optional[str] = None,
+            end: Optional[str] = None) -> dict:
+    """
+    完整分析流程。models 为空表示全部 11 个模型。
+
+    start / end 是**分析窗口**（默认近 5 年，见 C.DEFAULT_WINDOW_YEARS）。
+    抓取仍走固定长区间（C.FETCH_START_DATE），拿到后再裁剪 —— 见
+    data.fetch_start_for()：缓存名带 start，让它跟着窗口滚动会让缓存全 miss。
+    """
     models = models or MODEL_ORDER
     models = [m for m in models if m in MODELS]
     t0 = time.time()
@@ -873,7 +923,9 @@ def analyze(code: str, models: Optional[List[str]] = None,
 
     # ---------- 0. 数据
     prog("抓取基金与指数数据", 0.05)
-    panel = D.load_panel(code, refresh=refresh, verbose=False)
+    win_start, win_end = _parse_window(start, end)
+    panel = D.load_panel(code, start=(win_start or C.START_DATE),
+                         end=win_end, refresh=refresh, verbose=False)
     nav = panel["__FUND__"]
     name = (C.DEMO_FUNDS.get(code) or C.EXTENDED_FUNDS.get(code) or
             _guess_name(code))
@@ -908,6 +960,34 @@ def analyze(code: str, models: Optional[List[str]] = None,
     payload = {k: model_payload(r, nav_oos) for k, r in reps.items()}
     rank = ModelZoo.rank(reps)
 
+    # ---------- 4.5 风格漂移（2026-10-12）
+    # 分析窗口从固定 10 年改成近 5 年，就是因为这个：十年里风格与经理可能都变过，
+    # 混在一起拟合出的画像是历史平均，对当下没指导意义。
+    # 经理变更数据取不到（fund_manager_em 只有现任、无任职日期），所以改为
+    # 直接检测**风格本身**是否漂移 —— 权重序列是现成产物，且比经理更贴近问题。
+    drift: dict = {"ok": False, "reason": "无可用模型结果"}
+    try:
+        from .experiments import style_drift as _style_drift
+        best_key = None
+        if not rank.empty and "key" in rank.columns:
+            top = rank.iloc[0]
+            if pd.notna(top.get("样本外R²", np.nan)):
+                best_key = top["key"]
+        if best_key is None and reps:
+            best_key = next(iter(reps))
+        if best_key in reps:
+            rep = reps[best_key]
+            syn_nav_d = np.exp(rep.syn_ret.dropna().cumsum())
+            d = _style_drift(rep.weights_hist, nav=nav, syn_nav=syn_nav_d,
+                             name_of=getattr(C, "NAME_OF", {}))
+            d["model"] = best_key
+            d["model_name"] = (MODELS[best_key].name
+                               if best_key in MODELS else best_key)
+            drift = d
+    except Exception as e:                                   # noqa: BLE001
+        # 漂移检测是**诊断增强**，失败不能拖垮整个分析
+        drift = {"ok": False, "reason": f"{type(e).__name__}: {str(e)[:120]}"}
+
     prog("生成分析结论", 0.96)
     insights = build_insights(code, name, navb, corr, reps, rank, payload)
 
@@ -918,6 +998,7 @@ def analyze(code: str, models: Optional[List[str]] = None,
         "nav": navb,
         "correlation": corr,
         "insights": insights,
+        "style_drift": drift,
         "meta": {
             "n_days": int(panel.shape[0]),
             "n_assets": int(panel.shape[1] - 1),
@@ -944,6 +1025,17 @@ def analyze(code: str, models: Optional[List[str]] = None,
             "auto_equity": bool(auto_equity),
             "best_model": (rank.iloc[0]["key"] if not rank.empty and
                            pd.notna(rank.iloc[0]["样本外R²"]) else None),
+            # ---- 分析窗口（2026-10-12 新增）
+            # start/end 是**实际生效**的窗口（已裁剪）。它默认近 5 年而不是
+            # 原来的固定 2016 起：十年跨度会混入风格漂移与经理变更，
+            # 拟合出的画像是历史平均，对当下没有指导意义。
+            "window_years": round(
+                (panel.index[-1] - panel.index[0]).days / 365.25, 2),
+            "window_default_years": C.DEFAULT_WINDOW_YEARS,
+            "window_min_years": C.MIN_WINDOW_YEARS,
+            "window_requested": win_start,     # None = 用默认滚动窗口
+            # 抓取起点与分析起点解耦：缓存名带 start，跟着窗口滚动会让缓存全 miss
+            "fetch_start": D.fetch_start_for(win_start or C.START_DATE),
         },
     }
     prog("完成", 1.0)
@@ -1014,13 +1106,20 @@ def get_fund_name(code: str) -> str:
 def refit_single(code: str, model_key: str,
                  params: Optional[dict] = None,
                  max_rebal: Optional[int] = None,
-                 auto_equity: bool = True) -> dict:
+                 auto_equity: bool = True,
+                 start: Optional[str] = None,
+                 end: Optional[str] = None) -> dict:
     """
     只重跑一个模型（"重新学习"按钮）。
 
     数据走缓存，因此耗时 = 单模型滚动时间，远快于全量重算。
+
+    ★ start/end 必须与主分析一致 —— 否则"重新学习"会用默认窗口（近 5 年）重算，
+    而页面其它区块是用户选的窗口，结果混在两个区间上。
     """
-    panel = D.load_panel(code, verbose=False)
+    win_start, win_end = _parse_window(start, end)
+    panel = D.load_panel(code, start=(win_start or C.START_DATE),
+                         end=win_end, verbose=False)
     zoo_cfg = {**C.RBSA, "auto_equity": bool(auto_equity)}
     zoo = ModelZoo(zoo_cfg)
     rep = zoo.run(panel, [model_key], params={model_key: params or {}},
@@ -1116,6 +1215,12 @@ def backtest_fund(code: str, model_key: str = "enet_slsqp",
     def prog(stage, pct):
         if job_id:
             JOBS.update(job_id, stage=stage, progress=pct)
+
+    # ★ 回测区间同样受 2 年下限约束（C.MIN_WINDOW_DAYS）：样本太短时
+    #   warmup + 滚动窗口会吃掉大部分数据，回测数字只是噪声。
+    #   注意 panel **不**按 start_date 裁剪 —— 回测区间之前的数据要留给
+    #   模型做拟合与预热，裁剪由 run_backtest 在回测层做。
+    start_date, end_date = _parse_window(start_date, end_date)
 
     prog("加载数据", 0.1)
     panel = D.load_panel(code, verbose=False)

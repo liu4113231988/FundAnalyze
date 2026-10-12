@@ -139,7 +139,48 @@ MANAGER_OF = {
 }
 
 # ---------------------------------------------------------------- 时间区间
-START_DATE = "2016-01-01"          # 数据起点（留出足够预热期）
+# ★ 分析窗口（2026-10-12 改）：原来固定 2016 起（约 10 年）太长 ——
+#   风格漂移、经理变更、市场制度变化会把性质不同的样本混在一起，拟合出的
+#   "风格画像"是十年平均，对当下没有指导意义。
+#   但**不能短于 2 年**：多模型评估本身需 ≥312 交易日、叠加回测窗口需 ≥372，
+#   再留出滚动窗口(252)与预热，1 年样本连一个完整窗口都撑不起来。
+#   2 年 ≈ 488 交易日，warmup 后仍有 ~236 天可用窗口，是可行下限。
+DEFAULT_WINDOW_YEARS = 5           # 默认分析窗口（年）
+MIN_WINDOW_YEARS = 2               # 最短分析窗口（年）
+MIN_WINDOW_DAYS = int(365.25 * MIN_WINDOW_YEARS)   # 731 日历日，用于入参校验
+
+# ★ 抓取起点：**固定**，与分析窗口解耦。
+#   缓存名里带 start（fund_nav_{code}_{start}_total.csv），若让抓取起点跟着
+#   分析窗口滚动，那么每换一次窗口（甚至每天）都会让全部缓存 miss ——
+#   在离线/受限网络环境下等于直接拿不到数据。
+#   所以：抓取始终用这段固定长区间（同时保证预热期充足），
+#   分析时再裁剪到 START_DATE。见 data.fetch_start_for()。
+FETCH_START_DATE = "2016-01-01"
+
+
+def _rolling_start(years: int = DEFAULT_WINDOW_YEARS) -> str:
+    """
+    滚动起点：今天往前 `years` 年。
+
+    研究复现需要**固定**区间时，用环境变量 FIL_START_DATE 锁定
+    （例如 FIL_START_DATE=2021-10-12），否则每次运行起点都会平移一天。
+    """
+    import datetime as _dt
+    import os as _os
+    fixed = (_os.environ.get("FIL_START_DATE") or "").strip()
+    if fixed:
+        return fixed
+    today = _dt.date.today()
+    y = today.year - int(years)
+    for dd in (today.day, today.day - 1):      # 闰年 2/29 回退一天
+        try:
+            return _dt.date(y, today.month, dd).isoformat()
+        except ValueError:
+            continue
+    return _dt.date(y, today.month, 28).isoformat()
+
+
+START_DATE = _rolling_start()      # 分析起点：滚动近 5 年
 END_DATE = None                    # None = 取到最新
 
 # ---------------------------------------------------------------- 模型参数

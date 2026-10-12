@@ -548,7 +548,9 @@ async function checkName(code) {
     S.rollWin = +e.target.value || 120;
     if (!S.result) return;
     try {
-      const r = await api(`/api/corr?code=${S.result.code}&win=${S.rollWin}`);
+      const ws = windowStart(selectedWindowYears());
+      const r = await api(
+        `/api/corr?code=${S.result.code}&win=${S.rollWin}&start=${ws}`);
       S.result.correlation = r.correlation;
       renderCorr();
     } catch (err) {
@@ -598,11 +600,22 @@ function selectedRebal() {
   const v = +$('rebalSel').value;
   return v === 0 ? 0 : v;      // 0 表示不抽稀
 }
+// ---- 分析窗口（2026-10-12）：默认近 5 年，下限 2 年
+// 十年跨度会混入风格漂移与经理变更，拟合出的画像是历史平均，对当下没指导意义。
+function selectedWindowYears() {
+  return +$('windowSel').value;
+}
+function windowStart(years) {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - years);   // 闰年 2/29 会自动落到 2/28
+  return d.toISOString().slice(0, 10);
+}
 function updateRunHint() {
   const n = selectedModels().length;
   const rb = $('rebalSel').selectedOptions[0].textContent.split('·')[1].trim();
   $('runHint').textContent = `本次将跑 ${n} 个模型 · 重估点${rb}` +
-    (selectedAuto() ? ' · 仓位自适应' : '');
+    (selectedAuto() ? ' · 仓位自适应' : '') +
+    ` · 分析窗口近 ${selectedWindowYears()} 年`;
 }
 
 // ==================================================================== 运行分析
@@ -622,6 +635,10 @@ async function run(code, opts = {}) {
       params,
       max_rebal: selectedRebal(),
       auto_equity: selectedAuto(),
+      // ★ 分析窗口：默认近 5 年。必须显式传给后端 —— 结果缓存键里带窗口，
+      //   不传的话改窗口会命中旧结果。
+      start: windowStart(selectedWindowYears()),
+      end: null,
       refresh: !!opts.refresh,
     };
     // 强制重学：绕过结果缓存
@@ -680,6 +697,7 @@ function applyResult(res) {
   $('main').hidden = false;
   renderHead();
   renderInsights();
+  renderDrift();
   renderModelStrip();
   renderRank();
   renderSelected();
@@ -697,6 +715,7 @@ function renderHead() {
   $('fundMeta').textContent =
     `${st.start} ~ ${st.end} · ${st.n_days} 交易日 · 候选指数 ${m.n_assets} 个 · ` +
     `窗口 ${m.window} 日 / 重估 ${m.refit} 日 · 用时 ${m.elapsed}s` +
+    (m.window_years ? ` · 分析窗口 ${m.window_years} 年` : '') +
     (m.from_cache ? ' · 缓存' : '');
 
   const bm = r.models[S.best];
@@ -738,6 +757,44 @@ function renderInsights() {
     return `<div class="card ${realCls}">
       <div class="hd">${hd}</div><div class="bd">${it.text}</div></div>`;
   }).join('');
+}
+
+// ==================================================================== 风格漂移（权重层面）
+// 与上面 insights.drift（**相关性**层面）互补：这里看的是拟合权重的结构变化。
+// 之所以要单独看权重：经理变更数据取不到（免费源只有现任、无任职日期），
+// 而"风格是否变了"才是真正影响画像可用性的事 —— 换了人风格不一定变，
+// 没换人风格也可能漂。
+function renderDrift() {
+  const el = $('driftCard');
+  if (!el) return;
+  const d = S.result.style_drift;
+  if (!d || !d.ok) { el.innerHTML = ''; return; }
+
+  const cls = d.stable ? 'info' : 'warn';
+  const hd = d.stable ? '✓ 风格稳定（拟合权重层面）'
+                      : '⚠ 风格漂移（拟合权重层面）';
+  const cps = (d.change_points || []).slice(0, 3).map(c =>
+    `<li>${c['日期']}：${c['主要变动']}（L1 ${(+c['变化幅度']).toFixed(2)}，z=${c['z值']}）</li>`
+  ).join('');
+  const yrs = Object.keys(d.yearly_top || {}).map(y =>
+    `<li>${y}：` + (d.yearly_top[y] || []).map(t =>
+      `${t['名称']} ${(t['权重'] * 100).toFixed(1)}%`).join('、') + `</li>`
+  ).join('');
+  const ht = d.half_top || {};
+  const half = (ht['前半'] && ht['后半']) ? `
+    <div>前半（${ht['前半']['区间']}）：${(ht['前半']['主要持仓'] || [])
+      .map(t => `${t['名称']} ${(t['权重'] * 100).toFixed(1)}%`).join('、')}
+    <br/>后半（${ht['后半']['区间']}）：${(ht['后半']['主要持仓'] || [])
+      .map(t => `${t['名称']} ${(t['权重'] * 100).toFixed(1)}%`).join('、')}</div>` : '';
+
+  el.innerHTML = `<div class="card ${cls}">
+    <div class="hd">${hd} · ${d.model_name || d.model || ''} · ${d.span || ''}</div>
+    <div class="bd">${d.verdict || ''}
+      ${cps ? `<div style="margin-top:6px"><b>结构突变：</b><ul>${cps}</ul></div>` : ''}
+      ${half}
+      ${yrs ? `<details style="margin-top:6px"><summary>分年度主要持仓</summary><ul>${yrs}</ul></details>` : ''}
+      ${d.corr_note ? `<div style="margin-top:6px">${d.corr_note}</div>` : ''}
+    </div></div>`;
 }
 
 // ==================================================================== 模型条
@@ -1234,7 +1291,10 @@ async function applyParams() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code: S.result.code, model: k, params: o,
                               max_rebal: selectedRebal(),
-                              auto_equity: selectedAuto() })
+                              auto_equity: selectedAuto(),
+                              // 与主分析同窗口，否则重算会落在默认窗口上
+                              start: windowStart(selectedWindowYears()),
+                              end: null })
     });
     await pollRefit(r.job_id, k);
   } catch (e) {

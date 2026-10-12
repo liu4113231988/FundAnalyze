@@ -778,31 +778,71 @@ def load_fund_nav_cached(fund_code: str, start: str = C.START_DATE,
     return s
 
 
+def fetch_start_for(start: Optional[str] = None) -> str:
+    """
+    **抓取**起点：取 `start` 与 `C.FETCH_START_DATE` 的较早者。
+
+    ★ 为什么分析与抓取必须用两个起点（2026-10-12 改）：
+    缓存名里带 start（`fund_nav_{code}_{start}_total.csv`）。分析窗口改成滚动
+    近 N 年之后，如果抓取也跟着滚动，那么每换一次窗口、甚至每天运行都会让
+    全部缓存 miss —— 离线环境下等于拿不到任何数据；在线环境下则是每次重抓
+    全部指数，白白放大几十倍请求量。
+
+    所以抓取一律用固定长区间（缓存稳定 + 预热期充足），拿到之后再裁剪到
+    分析窗口。若用户显式要求比 FETCH_START_DATE 更早的区间，才真正提前抓取。
+
+    ISO 格式（YYYY-MM-DD）字符串可直接字典序比较，等价于日期比较。
+    """
+    s = str(start) if start else ""
+    # 取**较早者**：分析起点晚于固定起点时用固定起点（白赚一段预热数据，
+    # 且缓存必然命中）；只有用户显式要求更早的区间才真的提前抓取。
+    if not s or s > C.FETCH_START_DATE:
+        return C.FETCH_START_DATE
+    return s
+
+
 def load_panel(fund_code: str, start: str = C.START_DATE,
                end: Optional[str] = C.END_DATE, refresh: bool = False,
                verbose: bool = True,
                nav_basis: str = NAV_BASIS_TOTAL) -> pd.DataFrame:
     """
-    返回对齐后的价格面板：列 = 候选指数 + __FUND__。
+    返回对齐后的价格面板：列 = 候选指数 + __FUND__，**已裁剪到 [start, end]**。
 
     存储分层（★ 面板本身**不再缓存**，即时重建）：
 
-        指数池  index_universe_{start}.csv     全局一份（与基金无关）
-        净值    fund_nav_{code}_{start}.csv     每只一份（~100 KB）
+        指数池  index_universe_{fs}.csv         全局一份（与基金无关）
+        净值    fund_nav_{code}_{fs}.csv         每只一份（~100 KB）
         面板    = 两者 → align_prices() 即时重建（纯内存，<100 ms）
 
     为什么不缓存面板：面板里 95% 以上的列是指数，逐基金缓存会让同样的指数
     数据存 N 份（1 MB × 基金数）。拆成两个原子数据源之后，存储与抓取量都从
     O(基金 × 指数) 降到 O(基金 + 指数)；对齐是毫秒级内存操作，重建不亏。
+
+    ★ `start` 是**分析**起点，抓取用 fetch_start_for(start)（通常更早）。
+    对齐按**完整抓取区间**做（覆盖率筛选需要全样本），之后再裁剪到分析窗口 ——
+    顺序反过来会让覆盖率统计只看到窗口内的样本，把"曾经存在过的指数"误判为
+    缺失而剔除。
     """
-    nav = load_fund_nav_cached(fund_code, start, refresh=refresh, basis=nav_basis)
+    fs = fetch_start_for(start)
+    nav = load_fund_nav_cached(fund_code, fs, refresh=refresh, basis=nav_basis)
     if verbose:
         tag = "总回报" if nav_basis == NAV_BASIS_TOTAL else "累计净值(旧口径)"
         print(f"[data] 基金 {fund_code} {tag} {len(nav)} 行  "
               f"{nav.index[0].date()} ~ {nav.index[-1].date()}")
-    px = load_index_universe(start, end, refresh=refresh, verbose=verbose)
+    px = load_index_universe(fs, end, refresh=refresh, verbose=verbose)
     out = align_prices(px, nav)
+
+    # 裁剪到分析窗口
+    if start:
+        out = out.loc[out.index >= pd.Timestamp(start)]
+    if end:
+        out = out.loc[out.index <= pd.Timestamp(end)]
+    if out.empty:
+        raise ValueError(
+            f"{fund_code} 在 {start or '全区间'} ~ {end or '最新'} 内没有可用数据"
+            f"（抓取区间 {fs} ~ {end or '最新'}，请放宽分析窗口或检查代码）")
     if verbose:
         print(f"[data] 对齐后：{out.shape[0]} 交易日 × {out.shape[1]} 条序列 "
-              f"({out.index[0].date()} ~ {out.index[-1].date()})")
+              f"({out.index[0].date()} ~ {out.index[-1].date()})"
+              + (f"  [分析窗口 {start} 起]" if start else ""))
     return out

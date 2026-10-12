@@ -75,6 +75,8 @@
 
     <!-- 结论卡 -->
     <div class="cards" id="insights"></div>
+    <!-- 风格漂移（拟合权重层面）：与上面的「相关性层面」漂移互补 -->
+    <div class="cards" id="driftCard"></div>
   </section>
 
   <!-- ---------- 模型选择与对比 ---------- -->
@@ -94,6 +96,16 @@
             <option value="60" selected>60 · 推荐</option>
             <option value="100">100 · 精细</option>
             <option value="0">全部 · 最精确</option>
+          </select>
+        </label>
+        <label class="switch-inline" title="分析窗口：默认近 5 年。10 年跨度会混入风格漂移与经理变更，拟合出的画像是历史平均、对当下没有指导意义；最短 2 年，再短的话拟合窗口与预热会吃掉大部分数据">
+          分析窗口
+          <select id="windowSel" style="padding:5px 9px;border-radius:7px;
+            border:1px solid var(--line2);background:var(--bg2);color:var(--fg2);font-size:12px">
+            <option value="2">近 2 年（最短）</option>
+            <option value="3">近 3 年</option>
+            <option value="5" selected>近 5 年 · 推荐</option>
+            <option value="10">近 10 年</option>
           </select>
         </label>
         <span class="hint" id="runHint"></span>

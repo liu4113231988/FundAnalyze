@@ -119,7 +119,7 @@ def selection_aware_bootstrap(by_fund: pd.DataFrame, block: int = 60,
     if d.empty:
         return {"ok": False, "reason": "无逐基金 IR 数据"}
     rng = np.random.default_rng(seed)
-    out_rows = []
+    out_rows, skipped = [], []
     for fi, g in d.groupby("折"):
         wide = g.pivot_table(index="基金", columns="配置",
                              values="测试期IR", aggfunc="mean").dropna(how="any")
@@ -127,8 +127,16 @@ def selection_aware_bootstrap(by_fund: pd.DataFrame, block: int = 60,
             continue
         cfgs = list(wide.columns)
         M = wide.to_numpy(dtype=float)              # (基金 × 配置)
-        picked = g[g["被训练期选中"]]["配置"].unique().tolist()
+        # ★ 选中配置必须**过滤到 cfgs 内**再用 index。
+        #   逐基金表的配置过滤比汇总表更严（收益日数 < 30 的配置会被逐基金表
+        #   丢弃，而汇总只要部分基金有值就保留），于是"训练期选中的配置"
+        #   可能在逐基金表里根本不存在 —— 直接 index() 会 ValueError。
+        #   这里取交集；交集为空说明该折无法评估，跳过而不是崩。
+        picked = [p for p in g[g["被训练期选中"]]["配置"].unique().tolist()
+                  if p in cfgs]
         if not picked:
+            skipped.append(
+                f"折{fi}：训练期选中的配置在逐基金数据中缺失（样本过短被过滤）")
             continue
         real = float(M[:, cfgs.index(picked[0])].mean())
         n_f, n_c = M.shape
@@ -154,8 +162,11 @@ def selection_aware_bootstrap(by_fund: pd.DataFrame, block: int = 60,
         })
     df = pd.DataFrame(out_rows)
     if df.empty:
-        return {"ok": False, "reason": "所有折的基金/候选数不足"}
+        return {"ok": False,
+                "reason": "所有折的基金/候选数不足"
+                          + ("；" + "；".join(skipped) if skipped else "")}
     return {"ok": True, "per_fold": df,
+            "skipped": skipped,        # 被跳过的折必须可见，不能静默
             "summary": {
                 "折数": len(df),
                 "真实迁移IR均值": round(float(df["真实迁移IR"].mean()), 4),

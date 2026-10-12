@@ -334,11 +334,84 @@ def r11():
     chk(bool(np.isfinite(dec.astype(float)).all()), "决策序列不含非有限值")
 
 
+# ============================================================ R12 分析窗口与风格漂移
+def r12():
+    print("\nR12 · 分析窗口：默认近 5 年 / 下限 2 年 / 抓取起点与分析起点解耦")
+    from src import config as C
+    from src.data import fetch_start_for
+    from src.experiments import style_drift
+    from src.webapi import _parse_window
+
+    # 1) 抓取起点必须取**较早者**。反过来看似只差缓存命中率，实际是：
+    #    缓存名带 start，让它跟着窗口滚动 → 每次改窗口甚至每天运行都全 miss，
+    #    离线环境直接拿不到数据。
+    chk(fetch_start_for(C.START_DATE) == C.FETCH_START_DATE,
+        f"分析起点 {C.START_DATE} → 抓取起点 {fetch_start_for(C.START_DATE)}（固定更早）")
+    chk(fetch_start_for("2011-01-01") == "2011-01-01",
+        "显式要求更早区间时才真的提前抓取")
+
+    # 2) 下限 2 年：1 年样本连一个完整拟合窗口都撑不起来
+    chk(C.MIN_WINDOW_YEARS == 2 and C.DEFAULT_WINDOW_YEARS == 5,
+        f"默认 {C.DEFAULT_WINDOW_YEARS} 年 / 下限 {C.MIN_WINDOW_YEARS} 年")
+    s2, _ = _parse_window("2024-10-12", None)
+    chk(s2 == "2024-10-12", "刚好 2 年的区间通过")
+    for st, en, why in (("2025-10-12", None, "1 年"),
+                        ("2025-06-01", "2026-01-01", "0.6 年")):
+        try:
+            _parse_window(st, en)
+            chk(False, f"{why} 的区间应被拒绝")
+        except ValueError as ex:
+            chk("最短需" in str(ex), f"{why} 的区间被拒（{str(ex)[:34]}…）")
+    for st, en, why in ((None, None, "区间留空"),
+                        ("2026-01-01", "2025-01-01", "起始晚于结束"),
+                        ("bad", None, "日期格式错误")):
+        try:
+            _parse_window(st, en)
+            chk(why == "区间留空", f"{why} 的处理正确")
+        except ValueError:
+            chk(why != "区间留空", f"{why} 被正确拒绝")
+
+    # 3) 面板确实按窗口裁剪（需要本地缓存；没有缓存则跳过而不是误报失败）
+    try:
+        from src.data import load_panel
+        p2 = load_panel("110022", start=C._rolling_start(2), verbose=False)
+        p5 = load_panel("110022", start=C._rolling_start(5), verbose=False)
+        chk(len(p2) < len(p5),
+            f"近2年 {len(p2)} 行 < 近5年 {len(p5)} 行（确实裁剪了）")
+        chk(len(p2) >= 400,
+            f"近2年仍有 {len(p2)} 个交易日 —— 这是 2 年可行的依据")
+    except Exception as e:                                    # noqa: BLE001
+        print(f"  （跳过面板裁剪检查：{type(e).__name__}）")
+
+    # 4) 风格漂移检测：稳定样本 vs 换仓样本
+    idx = pd.bdate_range("2021-10-12", periods=60, freq="20D")
+    cols = list(C.NAME_OF.keys())[:6]
+    rng = np.random.default_rng(0)
+    w = np.abs(rng.normal(0.15, 0.01, (60, 6)))
+    w = w / w.sum(axis=1, keepdims=True) * 0.9
+    rs = style_drift(pd.DataFrame(w, index=idx, columns=cols))
+    chk(bool(rs.get("ok")) and bool(rs.get("stable")),
+        f"结构恒定的样本判为稳定（前后半距离 {rs.get('前后半距离')}）")
+
+    base = np.tile(np.array([0.45, 0.30, 0.15, 0.0, 0.0, 0.0]), (30, 1))
+    late = np.tile(np.array([0.0, 0.0, 0.10, 0.35, 0.35, 0.10]), (30, 1))
+    wd = np.clip(np.vstack([base, late]) + rng.normal(0, 0.008, (60, 6)), 0, None)
+    rd = style_drift(pd.DataFrame(wd, index=idx, columns=cols))
+    chk(bool(rd.get("ok")) and not bool(rd.get("stable")),
+        "中途整体换仓的样本判为漂移")
+    chk(int(rd.get("突变点数", 0)) >= 1,
+        f"检出 {rd.get('突变点数')} 次结构突变（最显著 {rd['change_points'][0]['日期']}）")
+    chk(float(rd["前后半距离"]) > float(rs["前后半距离"]) * 5,
+        f"漂移样本距离 {rd['前后半距离']} ≫ 稳定样本 {rs['前后半距离']}")
+    chk(style_drift(pd.DataFrame()).get("ok") is False,
+        "空输入返回 ok=False，不抛异常")
+
+
 def main():
     print("=" * 78)
     print("本轮 TODO 修复 · 行为回归")
     print("=" * 78)
-    for fn in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11):
+    for fn in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12):
         try:
             fn()
         except Exception as e:                                # noqa: BLE001

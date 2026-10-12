@@ -73,6 +73,11 @@ def main():
         if s["p值(上尾)均值"] > 0.05:
             print("  ★ 真实迁移 IR 没有超过'纯选择运气'的分布 —— "
                   "没有证据支持这条线索")
+    else:
+        print(f"  跳过：{sa.get('reason', '无可用数据')}")
+    # 被跳过的折必须可见：静默跳过会让"只算了 2/3 折"看起来像"算了全部"
+    for msg in sa.get("skipped") or []:
+        print(f"  ⚠ {msg}")
 
     # ---- 拆解过拟合代价
     dec = decompose_overfit_cost(cand)

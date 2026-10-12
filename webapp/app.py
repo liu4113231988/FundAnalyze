@@ -42,7 +42,7 @@ from src.models import MODEL_ORDER, model_catalog         # noqa: E402
 from src.webapi import (CACHE_DIR, JOBS, analyze, backtest_fund,  # noqa: E402
                          refit_single, _parse_max_rebal,
                          _parse_auto_equity, _check_params,
-                         _finite)
+                         _finite, _parse_window)
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -110,14 +110,18 @@ def catalog():
 
 # ====================================================================== 分析任务
 def _result_cache_path(code: str, models, params, max_rebal=None,
-                       auto_equity=False, data_stamp: str = ""):
+                       auto_equity=False, data_stamp: str = "",
+                       start: str = "", end: str = ""):
     import hashlib
     # ★ P1-05：缓存键必须绑定**底层数据摘要**，否则行情追加后旧结果不会失效，
     #   表现为"刷新无效"。data_stamp 由 src.data.data_stamp() 给出。
+    # ★ 2026-10-12：缓存键还必须绑定**分析窗口**。窗口默认近 5 年且可由前端
+    #   改变，若不加进键里，换窗口会命中旧窗口的结果（表现为"改了没反应"）。
     key = json.dumps({"v": C.CACHE_VERSION, "c": code,
                       "m": sorted(models or []),
                       "p": params or {}, "r": max_rebal or 0,
-                      "a": bool(auto_equity), "d": data_stamp},
+                      "a": bool(auto_equity), "d": data_stamp,
+                      "s": start or "", "e": end or ""},
                      sort_keys=True, ensure_ascii=False)
     h = hashlib.md5(key.encode()).hexdigest()[:10]
     # 版本号写进文件名，便于启动时清扫旧版本缓存
@@ -214,6 +218,11 @@ def api_analyze():
         params = _check_params(params)
     except ValueError as e:
         return _bad("params", str(e))
+    # 分析窗口（默认近 5 年，下限 2 年）。单独 try 是为了给出正确的 field。
+    try:
+        start, end = _parse_window(body.get("start"), body.get("end"))
+    except ValueError as e:
+        return _bad("start", str(e))
 
     if not (len(code) == 6 and code.isdigit()):
         return _bad("code", "请输入 6 位基金代码，例如 110022")
@@ -234,7 +243,8 @@ def api_analyze():
         stamp = D.data_stamp()
     except Exception:                             # noqa: BLE001
         stamp = "unknown"
-    cp = _result_cache_path(code, models, params, max_rebal, auto_equity, stamp)
+    cp = _result_cache_path(code, models, params, max_rebal, auto_equity,
+                            stamp, start, end)
     if cp.exists() and not refresh:
         try:
             with cp.open("rb") as f:
@@ -246,7 +256,8 @@ def api_analyze():
 
     # ---- 相同任务合并（N-08）：同参数的重复请求复用同一个 job_id，
     #      而不是起第二个进程池互相抢 CPU、最后还写同一个缓存文件。
-    _key = f"{code}|{','.join(sorted(models))}|{max_rebal}|{auto_equity}"
+    _key = (f"{code}|{','.join(sorted(models))}|{max_rebal}|{auto_equity}"
+            f"|{start}|{end}")
     _exist = JOBS.find_running(_key)
     if _exist:
         return jsonify({"ok": True, "job_id": _exist, "cached": False,
@@ -258,7 +269,7 @@ def api_analyze():
             JOBS.update(jid, stage="开始", progress=0.02)
             res = analyze(code, models=models, params=params,
                           refresh=refresh, job_id=jid, max_rebal=max_rebal,
-                          auto_equity=auto_equity)
+                          auto_equity=auto_equity, start=start, end=end)
             try:
                 _atomic_pickle_dump(res, cp)
             except Exception:                         # noqa: BLE001
@@ -309,6 +320,11 @@ def api_refit():
         params = _check_params(params)
     except ValueError as e:
         return _bad("params", str(e))
+    # ★ 窗口必须与主分析一致，否则重算结果落在默认窗口上
+    try:
+        start, end = _parse_window(body.get("start"), body.get("end"))
+    except ValueError as e:
+        return _bad("start", str(e))
     if model not in MODEL_ORDER:
         return _bad("model", f"未知模型：{model}")
     if not (len(code) == 6 and code.isdigit()):
@@ -320,7 +336,8 @@ def api_refit():
         try:
             JOBS.update(jid, stage=f"重新学习 {model}", progress=0.2)
             payload = refit_single(code, model, params, max_rebal=max_rebal,
-                                   auto_equity=auto_equity)
+                                   auto_equity=auto_equity,
+                                   start=start, end=end)
             JOBS.update(jid, progress=0.95, stage="组装结果")
             JOBS.finish(jid, payload)
         except Exception as e:                        # noqa: BLE001
@@ -348,14 +365,12 @@ def api_backtest():
         return jsonify({"error": "请输入 6 位基金代码"}), 400
     if model_key not in MODEL_ORDER:
         return jsonify({"error": f"未知模型：{model_key}"}), 400
-    for d, lbl in ((start_date, "起始"), (end_date, "结束")):
-        if d:
-            try:
-                pd.Timestamp(d)
-            except (ValueError, TypeError):
-                return jsonify({"error": f"{lbl}日期格式应为 YYYY-MM-DD"}), 400
-    if start_date and end_date and start_date >= end_date:
-        return _bad("start", "起始日需早于结束日")
+    # ★ 区间校验统一交给 _parse_window：格式、先后、以及 2 年下限
+    #   （旧实现只查格式与先后，1 个月的区间也能提交，回测结果全是噪声）
+    try:
+        start_date, end_date = _parse_window(start_date, end_date)
+    except ValueError as e:
+        return _bad("start", str(e))
     # 单边成本：负数或大到离谱的值必须挡在 4xx，不能让它在回测里静默生效
     if cost_rate is not None:
         if isinstance(cost_rate, bool) or not isinstance(cost_rate, (int, float)):
@@ -411,8 +426,15 @@ def api_corr():
     if not (len(code) == 6 and code.isdigit()):
         return jsonify({"error": "请输入 6 位基金代码"}), 400
     win = max(20, min(win, 750))
+    # ★ 必须与主分析同窗口，否则相关性区块与拟合结果来自不同区间
     try:
-        panel = D.load_panel(code, verbose=False)
+        w_start, w_end = _parse_window(request.args.get("start"),
+                                       request.args.get("end"))
+    except ValueError as e:
+        return _bad("start", str(e))
+    try:
+        panel = D.load_panel(code, start=(w_start or C.START_DATE),
+                             end=w_end, verbose=False)
         corr = correlation_block(panel, panel["__FUND__"], roll_n=win)
     except Exception as e:                            # noqa: BLE001
         return jsonify({"error": f"{type(e).__name__}: {str(e)[:200]}"}), 500

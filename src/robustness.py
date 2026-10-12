@@ -162,7 +162,14 @@ def block_bootstrap(excess: pd.DataFrame, sharpe_rf: float = 0.0,
     d = excess.dropna()
     n, m = d.shape
     if n < block * 3 or m < 2:
-        return {"share_pos": float("nan"), "p_value": float("nan")}
+        # ★ 早退分支必须返回**完整**结构。原来只给 share_pos / p_value，
+        #   调用方 bootstrap_sensitivity 再取 boot_p05 就 KeyError ——
+        #   这个 bug 在 10 年样本下不会触发（n 足够大），改成近 5 年窗口后
+        #   block=250 时需要 n ≥ 750，样本一短就炸。
+        nan = float("nan")
+        return {"share_pos": nan, "p_value": nan, "boot_mean": nan,
+                "boot_p05": nan, "boot_p95": nan,
+                "block": block, "n_boot": n_boot}
     rng = np.random.default_rng(seed)
     vals = d.values
     n_blocks = int(np.ceil(n / block))
@@ -210,10 +217,13 @@ def bootstrap_sensitivity(excess: pd.DataFrame, sharpe_rf: float = 0.0,
         r = block_bootstrap(excess, sharpe_rf=sharpe_rf, block=int(b),
                             n_boot=int(n_boot), seed=seed)
         rows.append({"块长": int(b),
-                     "为正比例": r["share_pos"],
-                     "p值": r["p_value"],
-                     "零假设5%分位": r["boot_p05"],
-                     "零假设95%分位": r["boot_p95"]})
+                     "为正比例": r.get("share_pos", float("nan")),
+                     "p值": r.get("p_value", float("nan")),
+                     "零假设5%分位": r.get("boot_p05", float("nan")),
+                     "零假设95%分位": r.get("boot_p95", float("nan")),
+                     # 样本在该块长下不足（n < block*3）时结果是 NaN，
+                     # 必须标出来 —— 否则"没有结论"会被读成"结论为不显著"
+                     "样本充足": bool(np.isfinite(r.get("p_value", float("nan"))))})
     return pd.DataFrame(rows)
 
 

@@ -396,3 +396,188 @@ def naive_benchmarks(panel: pd.DataFrame, fund_col: str = "__FUND__",
     _add(f"受约束回归（Σw={equity_ratio:.0%}）", w)
 
     return pd.DataFrame(rows)
+
+
+# ====================================================================== 风格漂移（2026-10-12）
+def _robust_z(x: np.ndarray) -> np.ndarray:
+    """
+    稳健 z 值：用中位数 / MAD 而不是均值 / 标准差。
+
+    ★ 为什么不能用普通 z：风格突变本身就是我们要找的**离群点**，它会同时
+    抬高均值和标准差 —— 用均值/标准差标准化，恰好把最该被标出来的那次变化
+    压回"正常范围"内（掩蔽效应，masking）。MAD 不受单点主导。
+    """
+    x = np.asarray(x, dtype=float)
+    if len(x) == 0:
+        return x
+    med = float(np.median(x))
+    mad = float(np.median(np.abs(x - med)))
+    sig = 1.4826 * mad
+    if not np.isfinite(sig) or sig <= 1e-12:
+        sig = float(np.std(x))
+    if not np.isfinite(sig) or sig <= 1e-12:
+        return np.zeros_like(x)
+    return (x - med) / sig
+
+
+def _top_moves(a: pd.Series, b: pd.Series, nm=None, k: int = 2,
+               eps: float = 0.01) -> str:
+    """把一次权重变化写成人话："沪深300 +12.3%、中证500 −8.1%"。"""
+    delta = (pd.Series(b, dtype=float) - pd.Series(a, dtype=float))
+    delta = delta.fillna(0.0)
+    order = delta.abs().sort_values(ascending=False).index
+    parts = []
+    for c in order[:k]:
+        dv = float(delta[c])
+        if abs(dv) < eps:
+            continue
+        label = (nm or {}).get(c, c)
+        parts.append(f"{label}{dv * 100:+.1f}%")
+    return "、".join(parts) if parts else "—"
+
+
+def style_drift(weights: pd.DataFrame,
+                nav: Optional[pd.Series] = None,
+                syn_nav: Optional[pd.Series] = None,
+                name_of: Optional[dict] = None,
+                top_k: int = 5, z_thresh: float = 3.0,
+                unstable_dist: float = 0.60) -> dict:
+    """
+    风格漂移检测（2026-10-12 新增）。
+
+    ★ 为什么要有它
+    --------------
+    分析窗口原本固定 2016 起（约 10 年）。十年里基金经理可能换过几任、
+    投资风格可能整个调过向，把这段样本混在一起拟合出的"风格画像"是十年平均，
+    对当下没有指导意义 —— 这正是把默认窗口改成近 5 年的原因。
+
+    但**经理变更数据取不到**：akshare 的 `fund_manager_em()` 只给"现任经理"
+    （36454 行、无任职起止日期），`fund_individual_detail_info_xq()` 只有费率。
+    免费数据源没有历史任职记录，所以无法直接检测"什么时候换了人"。
+
+    于是改为检测**风格本身**是否变了 —— 这其实比经理变更更贴近问题：
+    · 换了经理，风格不一定变；
+    · 没换经理，风格也可能漂。
+    权重序列是我们本来就有的产物，不需要任何额外数据源。
+
+    三个视角
+    --------
+    1. 结构突变：相邻两次重估之间权重向量的 L1 变化，用稳健 z 找离群点。
+    2. 前后半对比：区间前半与后半的平均权重 L1 距离（0~2，越大越漂移）。
+    3. 分年度画像：每年的前三大持仓，以及（若给了 nav/syn_nav）
+       基金与合成基准的年度相关性 —— 相关性逐年下滑是"基准跟不住了"的直接证据。
+
+    参数
+    ----
+    weights   : 重估日 × 资产的权重表（ModelZoo 的产物）
+    nav       : 基金净值（可选，用于年度相关性）
+    syn_nav   : 合成基准净值（可选，用于年度相关性）
+    z_thresh  : 判定"突变"的稳健 z 阈值，默认 3
+    unstable_dist : 前后半 L1 距离超过此值即判为不稳定，默认 0.60
+                    （权重和约 0.9，L1 上限约 1.8，0.6 ≈ 三分之一的仓位被重构）
+
+    返回 dict，`ok=False` 表示样本不足以判断（不抛异常）。
+    """
+    nm = name_of if name_of is not None else getattr(C, "NAME_OF", {})
+
+    w = pd.DataFrame(weights)
+    if isinstance(w.index, pd.DatetimeIndex):
+        w = w.sort_index()
+    w = w.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    # 全零行 = 预热期/空仓，不构成风格信息
+    w = w.loc[w.abs().sum(axis=1) > 1e-12]
+    n = len(w)
+    if n < 6:
+        return {"ok": False,
+                "reason": f"重估点只有 {n} 个，不足以判断漂移（至少需要 6 个）"}
+
+    # ---- 1. 结构突变
+    step = w.diff().abs().sum(axis=1).iloc[1:]      # 第 i 项 = w[i] → w[i+1]
+    sv = step.to_numpy(dtype=float)
+    zv = _robust_z(sv) if len(sv) else np.array([])
+
+    hits = [i for i in range(len(sv)) if zv[i] >= z_thresh]
+    hits = sorted(hits, key=lambda i: -sv[i])[:max(1, int(top_k))]
+    change_points = [{
+        "日期": str(w.index[i + 1].date()),
+        "变化幅度": round(float(sv[i]), 4),
+        "z值": round(float(zv[i]), 2),
+        "主要变动": _top_moves(w.iloc[i], w.iloc[i + 1], nm),
+    } for i in sorted(hits)]
+
+    # ---- 2. 前后半对比
+    h = n // 2
+    wa, wb = w.iloc[:h].mean(), w.iloc[h:].mean()
+    half_dist = float((wa - wb).abs().sum())
+
+    def _top(s: pd.Series, k: int = 3):
+        o = s[s > 1e-6].sort_values(ascending=False).head(k)
+        return [{"名称": nm.get(c, c), "权重": round(float(v), 4)}
+                for c, v in o.items()]
+
+    half_top = {
+        "前半": {"区间": f"{w.index[0].date()} ~ {w.index[h - 1].date()}",
+                 "主要持仓": _top(wa)},
+        "后半": {"区间": f"{w.index[h].date()} ~ {w.index[-1].date()}",
+                 "主要持仓": _top(wb)},
+    }
+
+    # ---- 3. 分年度画像
+    yearly_top, yearly_corr = {}, {}
+    for y, g in w.groupby(w.index.year):
+        yearly_top[int(y)] = _top(g.mean())
+
+    if nav is not None and syn_nav is not None:
+        try:
+            rf = np.log(pd.Series(nav).astype(float)).diff()
+            rs = np.log(pd.Series(syn_nav).astype(float)).diff()
+            pair = pd.concat([rf.rename("f"), rs.rename("s")], axis=1).dropna()
+            for y, g in pair.groupby(pair.index.year):
+                if len(g) >= 60 and g["f"].std() > 0 and g["s"].std() > 0:
+                    yearly_corr[int(y)] = round(float(g["f"].corr(g["s"])), 4)
+        except (TypeError, ValueError):            # noqa: BLE001
+            yearly_corr = {}
+
+    # ---- 结论
+    stable = bool(half_dist < unstable_dist and not change_points)
+    span = f"{w.index[0].date()} ~ {w.index[-1].date()}"
+    if stable:
+        verdict = (f"风格稳定：前后半权重距离 {half_dist:.2f}（阈值 {unstable_dist}），"
+                   f"无显著结构突变。这段区间的风格画像可以代表当下。")
+    else:
+        bits = []
+        if half_dist >= unstable_dist:
+            bits.append(f"前后半权重距离 {half_dist:.2f} ≥ {unstable_dist}")
+        if change_points:
+            bits.append(f"检出 {len(change_points)} 次结构突变"
+                        f"（最显著 {change_points[0]['日期']}，"
+                        f"{change_points[0]['主要变动']}）")
+        verdict = ("风格发生漂移：" + "；".join(bits)
+                   + "。当前画像混入了不同性质的样本，"
+                     "建议缩短窗口或分段查看（见 yearly_top）。")
+
+    corr_note = ""
+    if len(yearly_corr) >= 2:
+        vals = list(yearly_corr.values())
+        if max(vals) - min(vals) >= 0.15:
+            corr_note = (f"注意：年度相关性从 {max(vals):.2f} 到 {min(vals):.2f}，"
+                         f"波动 {max(vals) - min(vals):.2f} —— 合成基准在不同年份的"
+                         f"贴合度差异较大。")
+
+    return {
+        "ok": True,
+        "span": span,
+        "n_points": int(n),
+        "典型相邻变化": round(float(np.median(sv)), 4) if len(sv) else 0.0,
+        "最大相邻变化": round(float(np.max(sv)), 4) if len(sv) else 0.0,
+        "前后半距离": round(half_dist, 4),
+        "不稳定阈值": float(unstable_dist),
+        "突变点数": len(change_points),
+        "change_points": change_points,
+        "half_top": half_top,
+        "yearly_top": yearly_top,
+        "yearly_corr": yearly_corr,
+        "corr_note": corr_note,
+        "stable": stable,
+        "verdict": verdict,
+    }
