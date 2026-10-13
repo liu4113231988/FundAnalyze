@@ -4,6 +4,7 @@
 
     python run_holdings.py                    # 全部 EXTENDED_FUNDS
     python run_holdings.py 110022 000001      # 指定基金
+    python run_holdings.py --pool             # 用扩池后的基金池（src.fundpool.load_pool）
     python run_holdings.py --refresh          # 强制重抓持仓与行业映射
     python run_holdings.py --window-years 2   # 近 2 年窗口（下限 2 年）
 
@@ -104,9 +105,19 @@ def main():
                     help="基金代码，留空则用 EXTENDED_FUNDS")
     ap.add_argument("--refresh", action="store_true",
                     help="强制重抓持仓与行业映射")
+    ap.add_argument("--pool", action="store_true",
+                    help="用扩池后的基金池（output/data/fund_pool.csv），"
+                         "而非 C.EXTENDED_FUNDS")
     args = ap.parse_args()
     win_start, _ = apply_window(args)
-    codes = args.codes or list(C.EXTENDED_FUNDS.keys())
+    codes = args.codes
+    if not codes:
+        if args.pool:
+            from src.fundpool import pool_codes
+            codes = pool_codes()
+            print(f"[holdings] 使用扩池基金 {len(codes)} 只")
+        else:
+            codes = list(C.EXTENDED_FUNDS.keys())
 
     print(f"[holdings] 分析窗口 {win_start} 起 · 只用半年报/年报（完整持仓）· "
           f"披露滞后 {H.DISCLOSURE_LAG_DAYS} 天")
