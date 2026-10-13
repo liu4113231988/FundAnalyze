@@ -1,5 +1,15 @@
 # -*- coding: utf-8 -*-
-"""生成 HTML 研究报告。"""
+"""生成 HTML 研究报告。
+
+    python build_report.py                 # 主案例 + 默认近 5 年窗口
+    python build_report.py 110022          # 指定主案例
+    python build_report.py --window-years 2  # 近 2 年窗口（下限 2 年）
+
+注意：报告里跨基金的表格来自 `output/results/*.csv`，那些要由
+run_experiments / run_extended 等脚本在**同一个窗口**下生成，
+否则主案例与跨基金汇总会来自不同区间。
+"""
+import argparse
 import sys
 import warnings
 from pathlib import Path
@@ -16,6 +26,7 @@ from src.pipeline import run_fund
 from src.report import build_report
 from src.experiments import summarize_funds
 from src.runinfo import write_fingerprint, fingerprint_lines
+from src.window import add_window_args, apply_window
 
 
 def read_csv_safe(name: str):
@@ -29,7 +40,13 @@ def read_csv_safe(name: str):
 
 
 def main():
-    code = sys.argv[1] if len(sys.argv) > 1 else C.MAIN_FUND
+    ap = argparse.ArgumentParser(description=__doc__)
+    add_window_args(ap)
+    ap.add_argument("code", nargs="?", default=C.MAIN_FUND,
+                    help="主案例基金代码，默认 C.MAIN_FUND")
+    args = ap.parse_args()
+    apply_window(args)
+    code = args.code
     name = C.DEMO_FUNDS.get(code, C.EXTENDED_FUNDS.get(code, code))
 
     print(f"[report] 运行主案例 {code} {name} ...")

@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""诊断实验入口：IC 期限结构 / 通道消融 / 参数敏感性。"""
+"""诊断实验入口：IC 期限结构 / 通道消融 / 参数敏感性。
+
+    python run_experiments.py                    # 全部 DEMO_FUNDS，默认窗口
+    python run_experiments.py 110022 000001      # 指定基金
+    python run_experiments.py --window-years 2   # 改用近 2 年窗口（下限 2 年）
+"""
+import argparse
 import sys
 import time
 import warnings
@@ -12,6 +18,7 @@ import pandas as pd
 
 from src import config as C, data as D
 from src.pipeline import run_fund
+from src.window import add_window_args, apply_window
 from src.experiments import (ic_term_structure, channel_ablation,
                              param_sensitivity, summarize_funds)
 
@@ -19,7 +26,13 @@ pd.set_option("display.width", 200)
 
 
 def main():
-    codes = sys.argv[1:] or list(C.DEMO_FUNDS.keys())
+    ap = argparse.ArgumentParser(description=__doc__)
+    add_window_args(ap)
+    ap.add_argument("codes", nargs="*",
+                    help="基金代码，留空则用 DEMO_FUNDS")
+    args = ap.parse_args()
+    apply_window(args)
+    codes = args.codes or list(C.DEMO_FUNDS.keys())
     t0 = time.time()
     results, ics, abl, sens = {}, [], [], []
 

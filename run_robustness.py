@@ -11,7 +11,12 @@ E7 · 稳健性检验：E4 那条"250 日窗口 + 120 日再平衡"的线索到�
 
 ⚠ 因子回归里 β 接近 1 不代表模型有问题 —— 策略平均仓位只有 ~60%，
    低仓位策略天然就有 β≈0.6。真正的判据是 **α 是否显著为正**。
+
+    python run_robustness.py                 # 全部 14 只，默认近 5 年
+    python run_robustness.py 110022 000001   # 指定基金
+    python run_robustness.py --window-years 2  # 近 2 年窗口（下限 2 年）
 """
+import argparse
 import sys
 import time
 import warnings
@@ -32,6 +37,7 @@ from src.rbsa import RBSA
 from src.robustness import (assess_positions, assess_signal_edge,
                             bootstrap_sensitivity, hac_sensitivity,
                             multiplicity_adjust)
+from src.window import add_window_args, apply_window
 from src.signal import SignalEngine, build_decision
 
 pd.set_option("display.width", 200)
@@ -106,7 +112,13 @@ def _report(res: dict, label: str = "") -> None:
 
 
 def main():
-    codes = sys.argv[1:] or list(C.EXTENDED_FUNDS.keys())
+    ap = argparse.ArgumentParser(description=__doc__)
+    add_window_args(ap)
+    ap.add_argument("codes", nargs="*",
+                    help="基金代码，留空则用 EXTENDED_FUNDS")
+    args = ap.parse_args()
+    apply_window(args)
+    codes = args.codes or list(C.EXTENDED_FUNDS.keys())
     t0 = time.time()
     nav_by, pos_vt, pos_hg = {}, {}, {}
     syn_by, wt_by = {}, {}

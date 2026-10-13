@@ -23,7 +23,12 @@
 "多拟合了一些噪声"，它的稳定性应该**更差**而不是更好。
 
     python run_increment.py [基金代码...]
+    python run_increment.py --window-years 2      # 近 2 年窗口（下限 2 年）
+
+注意：本脚本用**面板内切分**做训练/测试（TRAIN_FRAC），窗口越短可切段越少；
+2 年窗口下 `sp < 200` 会直接跳过并返回 None。
 """
+import argparse
 import sys
 import warnings
 from pathlib import Path
@@ -41,6 +46,7 @@ import pandas as pd
 
 from src import config as C, data as D
 from src.models import _constrained_fit
+from src.window import add_window_args, apply_window
 
 TRAIN_FRAC = 0.70
 EQUITY = 0.90
@@ -144,7 +150,13 @@ def run_one(code):
 
 
 def main():
-    codes = sys.argv[1:] or list(C.EXTENDED_FUNDS.keys())
+    ap = argparse.ArgumentParser(description=__doc__)
+    add_window_args(ap)
+    ap.add_argument("codes", nargs="*",
+                    help="基金代码，留空则用 EXTENDED_FUNDS")
+    args = ap.parse_args()
+    apply_window(args)
+    codes = args.codes or list(C.EXTENDED_FUNDS.keys())
     rows = [r for r in (run_one(c) for c in codes) if r]
     if not rows:
         print("无有效结果")

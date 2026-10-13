@@ -684,8 +684,8 @@ def _with_info(meta: dict, df) -> dict:
 
 
 # ------------------------------------------------------------------ 分层缓存
-def load_index_universe(start: str = C.START_DATE,
-                        end: Optional[str] = C.END_DATE,
+def load_index_universe(start: Optional[str] = None,
+                        end: Optional[str] = None,
                         refresh: bool = False,
                         verbose: bool = True) -> pd.DataFrame:
     """
@@ -698,7 +698,13 @@ def load_index_universe(start: str = C.START_DATE,
 
     返回列 = 候选指数代码（不含 __FUND__），**未做对齐** —— 对齐依赖具体
     基金的交易日轴，仍由 load_panel 做。
+
+    ★ start/end 默认 None 而不是 `C.START_DATE`：Python 的默认参数在
+      **函数定义时**求值，写成 `start=C.START_DATE` 会让运行时修改
+      `C.START_DATE`（如 `--window-years 2`）完全无效。None 表示"用当前配置"。
     """
+    start = start or C.START_DATE
+    end = end if end is not None else C.END_DATE
     cache_name = f"index_universe_{start}" + (f"_to{end}" if end else "")
     meta = {"v": C.DATA_CACHE_VERSION, "n_candidates": len(C.NAME_OF),
             "start": start, "end": end}
@@ -729,7 +735,7 @@ def load_index_universe(start: str = C.START_DATE,
     return df
 
 
-def load_fund_nav_cached(fund_code: str, start: str = C.START_DATE,
+def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
                          refresh: bool = False,
                          basis: str = NAV_BASIS_TOTAL) -> pd.Series:
     """
@@ -743,6 +749,8 @@ def load_fund_nav_cached(fund_code: str, start: str = C.START_DATE,
     缓存名带 basis 后缀，两种口径互不覆盖。
     """
     suffix = "" if basis == NAV_BASIS_CUM else f"_{basis}"
+    # None → 当前配置的起点（见 load_index_universe 的说明）
+    start = start or C.START_DATE
     cache_name = f"fund_nav_{fund_code}_{start}{suffix}"
     meta = {"v": C.DATA_CACHE_VERSION, "code": fund_code, "start": start,
             "basis": basis}
@@ -801,8 +809,8 @@ def fetch_start_for(start: Optional[str] = None) -> str:
     return s
 
 
-def load_panel(fund_code: str, start: str = C.START_DATE,
-               end: Optional[str] = C.END_DATE, refresh: bool = False,
+def load_panel(fund_code: str, start: Optional[str] = None,
+               end: Optional[str] = None, refresh: bool = False,
                verbose: bool = True,
                nav_basis: str = NAV_BASIS_TOTAL) -> pd.DataFrame:
     """
@@ -823,6 +831,8 @@ def load_panel(fund_code: str, start: str = C.START_DATE,
     顺序反过来会让覆盖率统计只看到窗口内的样本，把"曾经存在过的指数"误判为
     缺失而剔除。
     """
+    start = start or C.START_DATE
+    end = end if end is not None else C.END_DATE
     fs = fetch_start_for(start)
     nav = load_fund_nav_cached(fund_code, fs, refresh=refresh, basis=nav_basis)
     if verbose:

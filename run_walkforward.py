@@ -14,7 +14,13 @@
 
 过拟合代价 = oracle − 迁移配置。若接近 0，说明参数选择没怎么过拟合；
 若显著为正，说明"从网格里挑最大值"确实只是挑到了噪声。
+
+    python run_walkforward.py                 # 全部 14 只，默认近 5 年
+    python run_walkforward.py 110022 000001   # 指定基金
+    python run_walkforward.py --window-years 2  # 近 2 年窗口（下限 2 年；
+        注意：折数多而窗口短时 E9b 可能因测试期样本不足而无法进行）
 """
+import argparse
 import sys
 import time
 import warnings
@@ -28,6 +34,7 @@ import pandas as pd
 
 from src import config as C, data as D
 from src.rbsa import RBSA
+from src.window import add_window_args, apply_window
 from src.walkforward import (walk_forward, walk_forward_time, default_grid)
 
 pd.set_option("display.width", 200)
@@ -39,7 +46,13 @@ except Exception:
 
 
 def main():
-    codes = sys.argv[1:] or list(C.EXTENDED_FUNDS.keys())
+    ap = argparse.ArgumentParser(description=__doc__)
+    add_window_args(ap)
+    ap.add_argument("codes", nargs="*",
+                    help="基金代码，留空则用 EXTENDED_FUNDS")
+    args = ap.parse_args()
+    apply_window(args)
+    codes = args.codes or list(C.EXTENDED_FUNDS.keys())
     t0 = time.time()
     per_fund = {}
     for c in codes:

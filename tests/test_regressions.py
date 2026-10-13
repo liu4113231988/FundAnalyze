@@ -407,11 +407,77 @@ def r12():
         "空输入返回 ok=False，不抛异常")
 
 
+# ============================================================ R13 窗口 CLI 解析
+def r13():
+    print("\nR13 · 分析窗口：CLI 解析、下限校验、抓取起点不随窗口漂移")
+    from src import config as C
+    from src.data import fetch_start_for
+    from src.window import resolve_window
+
+    # 无参数 → 跟随配置
+    s, e = resolve_window()
+    chk(s == C.START_DATE and e is None,
+        f"无参数时跟随配置（{s} ~ 最新）")
+
+    # 年数
+    s2, _ = resolve_window(years=2)
+    chk(s2 == C._rolling_start(2), f"years=2 → {s2}")
+
+    # 显式 start 优先于 years（文档声明的优先级）
+    s3, _ = resolve_window(years=5, start="2022-01-01")
+    chk(s3 == "2022-01-01", "显式 start 优先于 years")
+
+    # end 透传
+    _, e4 = resolve_window(start="2022-01-01", end="2024-01-01")
+    chk(e4 == "2024-01-01", f"end 透传 {e4}")
+
+    # 2 年下限
+    try:
+        resolve_window(start="2025-10-12")
+        chk(False, "约 1 年的区间应被拒绝")
+    except ValueError as ex:
+        chk("最短需" in str(ex), f"约 1 年的区间被拒（{str(ex)[:28]}…）")
+
+    # 格式与顺序
+    for kw, why in ((dict(start="2021/10/12"), "日期格式错误"),
+                    (dict(start="20211012"), "无分隔符的基本格式"),
+                    (dict(start="2021.10.12"), "点号分隔"),
+                    (dict(start="2021-1-1"), "单位数月日"),
+                    (dict(start="2026-01-01", end="2025-01-01"), "起始晚于结束")):
+        try:
+            resolve_window(**kw)
+            chk(False, f"{why} 应被拒绝")
+        except ValueError:
+            chk(True, f"{why} 被正确拒绝")
+    # 合法格式必须放行。用 _rolling_start(2) 而不是写死日期 —— 写死的日期
+    # 会随"今天"漂移，今天是 2026-10-13 时 "2024-10-14" 只有 729 天，差一天就被拒。
+    _ok2 = C._rolling_start(2)
+    chk(resolve_window(start=_ok2)[0] == _ok2,
+        f"标准格式放行（{_ok2}，距今天 {int((pd.Timestamp.today() - pd.Timestamp(_ok2)).days)} 天）")
+
+    # ★ 窗口变了，抓取起点必须仍是固定的 —— 否则缓存全 miss
+    for yrs in (2, 5, 10):
+        chk(fetch_start_for(resolve_window(years=yrs)[0]) == C.FETCH_START_DATE,
+            f"近 {yrs} 年窗口的抓取起点仍为 {C.FETCH_START_DATE}")
+
+    # 运行时覆盖 C.START_DATE 必须对 load_panel 生效（惰性解析的前提）
+    try:
+        from src.data import load_panel
+        p5 = load_panel("110022", verbose=False)
+        C.START_DATE = C._rolling_start(2)
+        p2 = load_panel("110022", verbose=False)
+        C.START_DATE = C._rolling_start(C.DEFAULT_WINDOW_YEARS)
+        chk(len(p2) < len(p5),
+            f"覆盖 C.START_DATE 后 load_panel 跟随：{len(p2)} < {len(p5)} 行")
+    except Exception as ex:                                # noqa: BLE001
+        print(f"  （跳过 load_panel 覆盖检查：{type(ex).__name__}）")
+
+
 def main():
     print("=" * 78)
     print("本轮 TODO 修复 · 行为回归")
     print("=" * 78)
-    for fn in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12):
+    for fn in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13):
         try:
             fn()
         except Exception as e:                                # noqa: BLE001

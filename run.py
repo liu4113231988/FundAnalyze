@@ -5,6 +5,13 @@
     python run.py                 # 跑全部演示基金
     python run.py 110022          # 只跑一只
     python run.py --refresh       # 强制重新抓取数据
+
+★ 两套"日期"不要混：
+    --start / --end        是**回测**窗口（在已拟合的样本里截一段评估）
+    --window-years / --window-start / --window-end 是**分析/拟合**窗口
+                        （默认近 5 年、下限 2 年，见 C.DEFAULT_WINDOW_YEARS）
+    回测区间之前的数据要留给模型做拟合与预热，所以面板按分析窗口裁剪，
+    不能按回测窗口裁剪 —— 否则预热数据被丢掉，拟合质量骤降。
 """
 import argparse
 import sys
@@ -19,6 +26,7 @@ import pandas as pd
 
 from src import config as C
 from src.pipeline import run_fund, save_result
+from src.window import add_window_args, apply_window
 
 
 def main():
@@ -27,7 +35,11 @@ def main():
     ap.add_argument("--refresh", action="store_true", help="强制刷新数据缓存")
     ap.add_argument("--start", default=None, help="回测起始日 YYYY-MM-DD")
     ap.add_argument("--end", default=None, help="回测结束日 YYYY-MM-DD")
+    add_window_args(ap)          # --window-years / --window-start / --window-end
     args = ap.parse_args()
+
+    # 分析窗口：就地覆盖 C.START_DATE / C.END_DATE，下游全部跟随
+    win_start, _ = apply_window(args)
 
     codes = args.codes or list(C.DEMO_FUNDS.keys())
     t0 = time.time()
@@ -37,7 +49,8 @@ def main():
         try:
             res = run_fund(code, C.DEMO_FUNDS.get(code, code),
                            refresh=args.refresh, verbose=True,
-                           start_date=args.start, end_date=args.end)
+                           start_date=args.start, end_date=args.end,
+                           window_start=win_start)
             outdir = save_result(res)
             results.append(res)
             m = res["backtest"]["metrics"]
