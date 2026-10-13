@@ -147,7 +147,7 @@ MANAGER_OF = {
 #   2 年 ≈ 488 交易日，warmup 后仍有 ~236 天可用窗口，是可行下限。
 DEFAULT_WINDOW_YEARS = 5           # 默认分析窗口（年）
 MIN_WINDOW_YEARS = 2               # 最短分析窗口（年）
-MIN_WINDOW_DAYS = int(365.25 * MIN_WINDOW_YEARS)   # 731 日历日，用于入参校验
+MIN_WINDOW_DAYS = int(365.25 * MIN_WINDOW_YEARS)   # =730 日历日，用于入参校验
 
 # ★ 抓取起点：**固定**，与分析窗口解耦。
 #   缓存名里带 start（fund_nav_{code}_{start}_total.csv），若让抓取起点跟着
@@ -169,7 +169,17 @@ def _rolling_start(years: int = DEFAULT_WINDOW_YEARS) -> str:
     import os as _os
     fixed = (_os.environ.get("FIL_START_DATE") or "").strip()
     if fixed:
-        return fixed
+        try:
+            _dt.date.fromisoformat(fixed)          # 只接受 YYYY-MM-DD
+            return fixed
+        except ValueError:
+            # ★ 必须校验格式。fetch_start_for() 用的是**字符串字典序**比较，
+            #   像 "2021/10/12" 这类格式会被误判成"晚于 2016-01-01"从而悄悄走
+            #   固定抓取起点分支；阿拉伯数字之外的写法更是完全不可预期。
+            #   这里拒绝并回退到滚动起点（不抛异常：环境配错不该让整个应用起不来）。
+            import warnings as _w
+            _w.warn(f"FIL_START_DATE={fixed!r} 不是 YYYY-MM-DD，已忽略，"
+                    f"改用滚动起点")
     today = _dt.date.today()
     y = today.year - int(years)
     for dd in (today.day, today.day - 1):      # 闰年 2/29 回退一天

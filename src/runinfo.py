@@ -95,6 +95,11 @@ def data_summary() -> Dict[str, Any]:
             "n_index_cache": len([f for f in files
                                   if f.name.startswith("index_universe_")]),
             "start_date": getattr(C, "START_DATE", None),
+            # ★ 分析窗口（2026-10-12）：START_DATE 是**滚动**的，只记录它无法
+            #   判断"这次跑的是几年窗口"。复现需要窗口年数与抓取起点一起记。
+            "window_years": getattr(C, "DEFAULT_WINDOW_YEARS", None),
+            "min_window_years": getattr(C, "MIN_WINDOW_YEARS", None),
+            "fetch_start": getattr(C, "FETCH_START_DATE", None),
         }
     except Exception as e:                                    # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}

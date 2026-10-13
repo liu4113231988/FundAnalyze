@@ -524,6 +524,12 @@ async function checkName(code) {
   renderModelPicker();
   $('rebalSel').onchange = updateRunHint;
   $('autoEquity').onchange = updateRunHint;
+  // 改分析窗口同样要刷新提示，否则"本次将跑…近 N 年"会停在旧值
+  $('windowSel').onchange = () => {
+    updateRunHint();
+    if (S.result) showAlert('分析窗口已改为近 ' + selectedWindowYears() +
+      ' 年，需重新分析后其他区块才会同步到新窗口。');
+  };
 
   $('searchForm').onsubmit = e => {
     e.preventDefault();
@@ -1541,9 +1547,14 @@ function initBacktestPicker() {
 
 function syncBacktestDefaults() {
   const st = S.result.nav.stats;
-  // 仅在用户尚未选择时预填，避免分析刷新后覆盖已选区间
-  if (!$('btStart').value && st.start) $('btStart').value = st.start;
-  if (!$('btEnd').value && st.end) $('btEnd').value = st.end;
+  // ★ 用户手动改过就尊重用户；否则每次都跟随当前分析窗口。
+  //   旧实现只在为空时预填：从 5 年切到 2 年重跑后，回测起点仍停在 5 年前，
+  //   与页面显示的窗口不一致（回测静默跑在别的区间上）。
+  $('btStart').onchange = $('btEnd').onchange = () => { S.btManual = true; };
+  if (!S.btManual) {
+    if (st.start) $('btStart').value = st.start;
+    if (st.end) $('btEnd').value = st.end;
+  }
   if (S.sel && S.cat.models.some(m => m.key === S.sel)) $('btModel').value = S.sel;
   $('btAuto').checked = $('autoEquity').checked;
 }

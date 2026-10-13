@@ -18,12 +18,22 @@ from .signal import SignalEngine, build_decision, health_stats
 
 def run_fund(code: str, name: str = "", refresh: bool = False,
              verbose: bool = True, start_date: Optional[str] = None,
-             end_date: Optional[str] = None) -> dict:
+             end_date: Optional[str] = None,
+             window_start: Optional[str] = None) -> dict:
+    """
+    window_start / end_date 是**分析窗口**（默认近 5 年，见 C.DEFAULT_WINDOW_YEARS）。
+    start_date / end_date 是**回测**窗口 —— 两者不同：回测区间之前的数据要留给
+    模型做拟合与预热，所以面板不能按 start_date 裁剪。
+
+    ★ 旧实现只把 start_date 传给 run_backtest，面板恒用默认窗口，
+      于是 `run.py --start` 改的只是回测段，拟合窗口永远不变。
+    """
     name = name or C.DEMO_FUNDS.get(code, code)
     if verbose:
         print(f"\n{'='*78}\n>>> {code} {name}\n{'='*78}")
 
-    panel = D.load_panel(code, refresh=refresh, verbose=False)
+    panel = D.load_panel(code, start=(window_start or C.START_DATE),
+                         end=end_date, refresh=refresh, verbose=False)
     nav = panel["__FUND__"]
     if verbose:
         print(f"[data] {panel.shape[0]} 交易日 × {panel.shape[1]-1} 条指数  "
@@ -105,10 +115,23 @@ def run_fund(code: str, name: str = "", refresh: bool = False,
             print("               该方案的绩效差异仅来自仓位水平，"
                   "不得作为择时能力的证据。")
 
+    # ---------- 3.5 风格漂移（2026-10-12）
+    # 经理变更无法检测（免费源只有现任、无任职日期），改为检测**风格本身**
+    # 是否漂移。报告路径此前拿不到这个字段（只有 Web 前端有），这里补上。
+    try:
+        from .experiments import style_drift as _style_drift
+        drift = _style_drift(fit["weights"], nav=nav_oos, syn_nav=syn_nav,
+                             name_of=getattr(C, "NAME_OF", {}))
+    except Exception as e:                                   # noqa: BLE001
+        drift = {"ok": False, "reason": f"{type(e).__name__}: {str(e)[:120]}"}
+    if verbose and drift.get("ok"):
+        print(f"\n[结果] 风格漂移：{drift['verdict']}")
+
     return {
         "code": code, "name": name,
         "panel": panel, "nav": nav,
         "weights_hist": fit["weights"], "fit_diag": fit["diag"],
+        "style_drift": drift,
         "syn_nav": syn_nav, "syn_ret": syn_ret,
         "signal": sig, "health": health,
         # 健康门控的仓位列：下游要做成本敏感性（E10）等需要原始仓位序列，

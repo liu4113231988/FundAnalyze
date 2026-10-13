@@ -328,9 +328,15 @@ def walk_forward_time(per_fund: Dict[str, dict], grid: Optional[List[dict]] = No
         te = _table((t0, t1))
         keys = sorted({k for c in tr for k in tr[c]})
         if not keys or not te:
+            # ★ 必须说清"为什么没结论"。旧文案只有"样本过短"，看不出是
+            #   **测试期**太短、还是全部基金都被过滤掉了 —— 窗口改成近 2 年时
+            #   每折测试段只有 ~77 个交易日，低于 _table 的 160 下限，
+            #   于是每只基金都被跳过，看起来像"跑完了"其实是"没跑成"。
             rows.append({"折": fi, "训练区间": f"{s0.date()}~{s1.date()}",
                          "测试区间": f"{t0.date()}~{t1.date()}",
-                         "备注": "该折无可用配置（样本过短）"})
+                         "备注": (f"该折无可用配置：测试期仅 "
+                                  f"{len(te)}/{len(codes)} 只基金满足 ≥160 交易日"
+                                  f"（测试区间约 {(t1 - t0).days} 天）")})
             continue
         best_key = max(keys, key=lambda k: (_mean_ir(tr, k)
                                             if np.isfinite(_mean_ir(tr, k))
@@ -386,6 +392,13 @@ def walk_forward_time(per_fund: Dict[str, dict], grid: Optional[List[dict]] = No
                 oos_parts.append(te[c][best_key]["excess"].rename(f"{c}|折{fi}"))
 
     df = pd.DataFrame(rows)
+    # ★ 一折都没跑成就必须报失败，而不是返回 ok=True + 全 NaN 的汇总。
+    #   后者会被读成"验证通过但结果为负"，而真相是"根本没验证"。
+    if not any("备注" not in r for r in rows):
+        return {"ok": False,
+                "reason": ("所有折的测试期样本均不足（每只基金可用交易日 < 160），"
+                           "时间向前验证无法进行 —— 请放宽分析窗口或减少折数"),
+                "folds": df}
     oos = pd.concat(oos_parts, axis=1) if oos_parts else pd.DataFrame()
     mig = df.get("测试集IR(迁移)", pd.Series(dtype=float))
     orc = df.get("测试集IR(oracle)", pd.Series(dtype=float))

@@ -443,6 +443,49 @@ def build_report(main: dict, summary: pd.DataFrame, experiments: Dict[str, pd.Da
     except Exception:                                        # noqa: BLE001
         _alpha_note = ''
 
+    # ---------------- 风格漂移（2026-10-12）
+    # 经理变更无法自动检测（免费源只有现任、无任职起止日期），所以改为直接
+    # 回答"这段区间的风格画像能不能代表当下"——这才是真正影响可用性的事。
+    _drift_note = ''
+    try:
+        _sd = main.get("style_drift") or {}
+        if _sd.get("ok"):
+            _cls = "good" if _sd.get("stable") else "warn"
+            _parts = ['<div class="lead ' + _cls + '"><b>'
+                      + str(_sd.get("verdict", "")) + '</b></div>']
+            _cps = (_sd.get("change_points") or [])[:3]
+            if _cps:
+                _li = "".join(
+                    "<li><b>" + str(c["日期"]) + "</b>：" + str(c["主要变动"])
+                    + "（L1 " + f"{c['变化幅度']:.2f}" + "，稳健 z="
+                    + str(c["z值"]) + "）</li>" for c in _cps)
+                _parts.append("<p>结构突变（最多列 3 次）：</p><ul>" + _li + "</ul>")
+            _ht = _sd.get("half_top") or {}
+            if _ht.get("前半") and _ht.get("后半"):
+                def _fw(lst):
+                    return "、".join("%s %.1f%%" % (x["名称"], x["权重"] * 100)
+                                    for x in lst)
+                _parts.append(
+                    "<p>前半（" + str(_ht["前半"]["区间"]) + "）："
+                    + _fw(_ht["前半"]["主要持仓"])
+                    + "<br/>后半（" + str(_ht["后半"]["区间"]) + "）："
+                    + _fw(_ht["后半"]["主要持仓"]) + "</p>")
+            if _sd.get("corr_note"):
+                _parts.append('<p style="font-size:13px;color:#64748b">'
+                              + str(_sd["corr_note"]) + "</p>")
+            _parts.append(
+                '<p style="font-size:13px;color:#64748b">这里检测的是<b>拟合权重</b>'
+                '的结构变化，与「相关性层面」的漂移互为补充。经理变更无法自动检测'
+                '（数据源只有现任经理、无任职起止日期），而<b>风格是否漂移</b>'
+                '才是决定画像能否代表当下的直接因素 —— 换了经理风格不一定变，'
+                '没换经理风格也可能漂。</p>')
+            _drift_note = "".join(_parts)
+        else:
+            _drift_note = ('<p style="font-size:13px;color:#64748b">风格漂移检测未运行：'
+                           + str(_sd.get("reason", "无数据")) + '</p>')
+    except Exception:                                        # noqa: BLE001
+        _drift_note = ''
+
     perf = m.reset_index().rename(columns={"方案": "方案"})
     metrics_tbl = _table(perf, index=False, fmts={
         "年化收益": "pct", "年化波动": "pct", "夏普": "f3", "算术夏普": "f3",
@@ -720,6 +763,9 @@ ICIR = {_safe(main['backtest']['icir'], '.2f')}，
 多头胜率 {_safe(main['backtest']['win_long'], '.1%')}（≈随机），
 年化换手 {_safe(main['backtest']['turnover'], '.2f')} 倍。
 <b>信号与未来收益之间没有可用的线性关系。</b></p>
+
+<h3>3.5 风格漂移：这段区间的画像能代表当下吗</h3>
+{_drift_note}
 </section>
 
 <section>
