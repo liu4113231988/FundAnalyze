@@ -11,8 +11,7 @@
     2. 离线分析前的准备 —— 缓存齐全后 run.py / run_extended.py / webapp 全部离线可用
 
 存储结构（src/data.py 的分层缓存）：
-    output/data/index_universe_{start}.csv   指数池，全局一份，与基金无关
-    output/data/fund_nav_{code}_{start}.csv  基金净值，每只一份（~50 KB）
+    output/data/market.duckdb  指数与基金日频行情（旧 CSV 自动导入）
     面板 = 两者对齐后即时重建，不落盘。
 """
 import argparse

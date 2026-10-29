@@ -22,8 +22,6 @@ import json
 import os
 import pickle
 import sys
-import threading
-import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,15 +32,16 @@ warnings.filterwarnings("ignore")
 
 from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
 from flask_cors import CORS                                # noqa: E402
-import pandas as pd                                        # noqa: E402
 
 from src import config as C                                # noqa: E402
 from src import data as D                                  # noqa: E402
 from src.models import MODEL_ORDER, model_catalog         # noqa: E402
-from src.webapi import (CACHE_DIR, JOBS, analyze, backtest_fund,  # noqa: E402
-                         refit_single, _parse_max_rebal,
-                         _parse_auto_equity, _check_params,
-                         _finite, _parse_window)
+from src.webapi import CACHE_DIR, analyze, backtest_fund, refit_single
+from src.jobs import JOBS, JobRunner, JobsBusy
+from src.webparams import (_parse_max_rebal, _parse_auto_equity,
+                           _check_params, _finite, _parse_window)
+from src.fileio import _atomic_pickle_dump
+
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -119,7 +118,7 @@ def _result_cache_path(code: str, models, params, max_rebal=None,
     #   改变，若不加进键里，换窗口会命中旧窗口的结果（表现为"改了没反应"）。
     key = json.dumps({"v": C.CACHE_VERSION, "c": code,
                       "m": sorted(models or []),
-                      "p": params or {}, "r": max_rebal or 0,
+                      "p": params or {}, "r": (C.RBSA.get("max_rebal") if max_rebal is None else max_rebal),
                       "a": bool(auto_equity), "d": data_stamp,
                       "s": start or "", "e": end or ""},
                      sort_keys=True, ensure_ascii=False)
@@ -128,15 +127,7 @@ def _result_cache_path(code: str, models, params, max_rebal=None,
     return CACHE_DIR / f"result_v{C.CACHE_VERSION}_{code}_{h}.pkl"
 
 
-# ------------------------------------------------------------------ 参数校验（P1-06）
-# 硬上限：再大只是把请求拖到超时，没有任何额外精度收益
-MAX_REBAL_HARD = 2000
-_INF = float("inf")
-
-# 并发闸门（P1-07）：分析任务内部还会开进程池，不设上限会把 CPU/内存打满。
-# 单实例即可，不需要引入分布式系统；超限时返回 429 而不是排队到超时。
-MAX_CONCURRENT_JOBS = int(os.environ.get("FIL_MAX_JOBS", "2"))
-_JOB_SEM = threading.BoundedSemaphore(max(1, MAX_CONCURRENT_JOBS))
+RUNNER = JobRunner(JOBS, max_jobs=int(os.environ.get("FIL_MAX_JOBS", "2")))
 
 
 def _bad(field: str, msg: str, status: int = 400):
@@ -144,50 +135,13 @@ def _bad(field: str, msg: str, status: int = 400):
     return jsonify({"ok": False, "error": msg, "field": field}), status
 
 
-# ------------------------------------------------------------------ 参数解析
-# _finite / _parse_max_rebal / _parse_auto_equity / _check_params 定义在
-# src/webapi.py —— 放在那里是为了让离线回归测试能直接导入它们
-# （导入本模块会触发 Flask 初始化与旧缓存清扫，不适合在测试里做）。
-
-
-def _atomic_pickle_dump(obj, path: Path, retries: int = 6):
-    """
-    原子写盘：先写同目录临时文件再 os.replace。
-
-    为什么必须这样：结果缓存路径只由 (基金, 模型集, 参数) 决定，而任务 id 带时间戳，
-    所以**两个相同的并发请求会持有不同的 job_id 却写同一个文件**。
-    直接 open(path,'wb') 会让两个线程交错写入，产生截断/半截的 pickle，
-    而读取侧只是 try/except 吞掉异常 → 表现为"缓存偶尔失效、偶尔白屏"。
-
-    两个踩过的坑：
-      1. 临时文件名必须**每次调用唯一**。只加 pid 是不够的——Flask 是多线程，
-         同进程内的并发请求会撞同一个 tmp 名，互相覆盖。
-      2. Windows 下 os.replace 在目标文件被另一线程短暂占用时会抛 WinError 32，
-         必须重试；重试仍失败就放弃写缓存（缓存本身是 best-effort，不该让请求失败）。
-    """
-    import os
-    import threading
-    import time
-    import uuid
-
-    tmp = path.with_name(
-        f"{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}.tmp")
+def _start_job(code, models, work, key=None):
+    """HTTP 只负责把调度结果转换为响应。"""
     try:
-        with tmp.open("wb") as f:
-            pickle.dump(obj, f)
-        for i in range(retries):
-            try:
-                os.replace(tmp, path)
-                return
-            except OSError:
-                if i == retries - 1:
-                    raise
-                time.sleep(0.05 * (i + 1))
-    finally:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        jid, merged = RUNNER.submit(code, models, work, key=key)
+    except JobsBusy as error:
+        return _bad("concurrency", str(error), 429)
+    return jsonify({"ok": True, "job_id": jid, "cached": False, "merged": merged})
 
 
 def _sweep_old_caches():
@@ -207,6 +161,8 @@ _sweep_old_caches()
 @app.route("/api/analyze", methods=["POST"])
 def api_analyze():
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return _bad("body", "请求体必须是对象")
     code = str(body.get("code", "")).strip()
     models = body.get("models") or MODEL_ORDER
     params = body.get("params") or {}
@@ -232,12 +188,6 @@ def api_analyze():
     if bad:
         return _bad("models", f"未知模型：{','.join(map(str, bad))}")
 
-    # ---- 并发闸门（P1-07）：每个任务内部还会开进程池，不设上限会把 CPU 打满
-    if not _JOB_SEM.acquire(blocking=False):
-        return _bad("concurrency",
-                    f"同时运行的分析任务已达上限 {MAX_CONCURRENT_JOBS}，请稍后重试",
-                    429)
-
     # ---- 缓存命中：直接返回
     try:
         stamp = D.data_stamp()
@@ -254,36 +204,19 @@ def api_analyze():
         except Exception:                             # noqa: BLE001
             pass
 
-    # ---- 相同任务合并（N-08）：同参数的重复请求复用同一个 job_id，
-    #      而不是起第二个进程池互相抢 CPU、最后还写同一个缓存文件。
-    _key = (f"{code}|{','.join(sorted(models))}|{max_rebal}|{auto_equity}"
-            f"|{start}|{end}")
-    _exist = JOBS.find_running(_key)
-    if _exist:
-        return jsonify({"ok": True, "job_id": _exist, "cached": False,
-                        "merged": True})
-    jid = JOBS.create(code, models, key=_key)
-
-    def worker():
+    def work(jid):
+        res = analyze(code, models=models, params=params,
+                      refresh=refresh, job_id=jid, max_rebal=max_rebal,
+                      auto_equity=auto_equity, start=start, end=end)
         try:
-            JOBS.update(jid, stage="开始", progress=0.02)
-            res = analyze(code, models=models, params=params,
-                          refresh=refresh, job_id=jid, max_rebal=max_rebal,
-                          auto_equity=auto_equity, start=start, end=end)
-            try:
-                _atomic_pickle_dump(res, cp)
-            except Exception:                         # noqa: BLE001
-                pass      # 缓存写失败不影响本次返回结果，下次重算即可
-            JOBS.finish(jid, res)
-        except Exception as e:                        # noqa: BLE001
-            traceback.print_exc()
-            JOBS.fail(jid, f"{type(e).__name__}: {str(e)[:300]}")
-        finally:
-            _JOB_SEM.release()
+            final_cp = _result_cache_path(code, models, params, max_rebal,
+                                          auto_equity, D.data_stamp(), start, end)
+            _atomic_pickle_dump(res, final_cp)
+        except Exception:
+            app.logger.exception("分析成功，但结果缓存写入失败")
+        return res
 
-    threading.Thread(target=worker, name=f"job-{jid}",
-                     daemon=True).start()
-    return jsonify({"ok": True, "job_id": jid, "cached": False})
+    return _start_job(code, models, work, key=f"{cp.name}|refresh={refresh}")
 
 
 @app.route("/api/job/<jid>")
@@ -311,13 +244,15 @@ def api_result(jid: str):
 def api_refit():
     """对单个模型重新学习（可带新超参），用于「换参数重试」。"""
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return _bad("body", "请求体必须是对象")
     code = str(body.get("code", "")).strip()
     model = str(body.get("model", "")).strip()
     params = body.get("params") or {}
     try:
         max_rebal = _parse_max_rebal(body.get("max_rebal", None), default=None)
         auto_equity = _parse_auto_equity(body)
-        params = _check_params(params)
+        params = _check_params({model: params})[model]
     except ValueError as e:
         return _bad("params", str(e))
     # ★ 窗口必须与主分析一致，否则重算结果落在默认窗口上
@@ -330,23 +265,12 @@ def api_refit():
     if not (len(code) == 6 and code.isdigit()):
         return _bad("code", "请输入 6 位基金代码")
 
-    jid = JOBS.create(code, [model])
+    def work(jid):
+        JOBS.update(jid, stage=f"重新学习 {model}", progress=0.2)
+        return refit_single(code, model, params, max_rebal=max_rebal,
+                            auto_equity=auto_equity, start=start, end=end)
 
-    def worker():
-        try:
-            JOBS.update(jid, stage=f"重新学习 {model}", progress=0.2)
-            payload = refit_single(code, model, params, max_rebal=max_rebal,
-                                   auto_equity=auto_equity,
-                                   start=start, end=end)
-            JOBS.update(jid, progress=0.95, stage="组装结果")
-            JOBS.finish(jid, payload)
-        except Exception as e:                        # noqa: BLE001
-            traceback.print_exc()
-            JOBS.fail(jid, f"{type(e).__name__}: {str(e)[:300]}")
-
-    threading.Thread(target=worker, name=f"refit-{jid}",
-                     daemon=True).start()
-    return jsonify({"ok": True, "job_id": jid})
+    return _start_job(code, [model], work)
 
 
 # ====================================================================== 决策回测
@@ -354,9 +278,14 @@ def api_refit():
 def api_backtest():
     """基于拟合健康度的买卖决策，在用户指定日期区间上做回测。"""
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return _bad("body", "请求体必须是对象")
     code = str(body.get("code", "")).strip()
     model_key = str(body.get("model", "enet_slsqp")).strip()
-    auto_equity = bool(body.get("auto_equity", False))
+    try:
+        auto_equity = _parse_auto_equity(body)
+    except ValueError as e:
+        return _bad("auto_equity", str(e))
     start_date = body.get("start") or None
     end_date = body.get("end") or None
     cost_rate = body.get("cost_rate", None)
@@ -379,22 +308,12 @@ def api_backtest():
             return _bad("cost_rate", "cost_rate 应在 [0, 0.05] 区间内")
         cost_rate = float(cost_rate)
 
-    jid = JOBS.create(code, [model_key])
+    def work(jid):
+        return backtest_fund(code, model_key=model_key,
+                             auto_equity=auto_equity, start_date=start_date,
+                             end_date=end_date, cost_rate=cost_rate, job_id=jid)
 
-    def worker():
-        try:
-            payload = backtest_fund(code, model_key=model_key,
-                                    auto_equity=auto_equity,
-                                    start_date=start_date, end_date=end_date,
-                                    cost_rate=cost_rate, job_id=jid)
-            JOBS.finish(jid, payload)
-        except Exception as e:                        # noqa: BLE001
-            traceback.print_exc()
-            JOBS.fail(jid, f"{type(e).__name__}: {str(e)[:300]}")
-
-    threading.Thread(target=worker, name=f"bt-{jid}",
-                     daemon=True).start()
-    return jsonify({"ok": True, "job_id": jid})
+    return _start_job(code, [model_key], work)
 
 
 @app.route("/api/name/<code>")

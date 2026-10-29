@@ -43,7 +43,7 @@ import numpy as np
 import pandas as pd
 
 from . import config as C
-from .data import _atomic_csv_write
+from .fileio import _atomic_csv_write
 
 # 披露滞后的保守取值（自然日）。季末 → 公布：Q2 约 7 月下旬、Q4 约 1 月下旬，
 # 法定披露截止分别是 7/31 与 1/31。取 45 天留出余量。

@@ -188,7 +188,7 @@ def r5():
 # ============================================================ R6 P1-06 参数校验
 def r6():
     print("\nR6 · P1-06 API 参数：非法输入停在 4xx，语义三态分清")
-    from src.webapi import (_parse_max_rebal, _parse_auto_equity,
+    from src.webparams import (_parse_max_rebal, _parse_auto_equity,
                             _check_params)
 
     chk(_parse_max_rebal(None, default=None) is None,
@@ -340,7 +340,7 @@ def r12():
     from src import config as C
     from src.data import fetch_start_for
     from src.experiments import style_drift
-    from src.webapi import _parse_window
+    from src.window import parse_window as _parse_window
 
     # 1) 抓取起点必须取**较早者**。反过来看似只差缓存命中率，实际是：
     #    缓存名带 start，让它跟着窗口滚动 → 每次改窗口甚至每天运行都全 miss，

@@ -722,7 +722,8 @@ function renderHead() {
     `${st.start} ~ ${st.end} · ${st.n_days} 交易日 · 候选指数 ${m.n_assets} 个 · ` +
     `窗口 ${m.window} 日 / 重估 ${m.refit} 日 · 用时 ${m.elapsed}s` +
     (m.window_years ? ` · 分析窗口 ${m.window_years} 年` : '') +
-    (m.from_cache ? ' · 缓存' : '');
+    (m.from_cache ? ' · 缓存' : '') +
+    (m.data_basis ? ' · ' + m.data_basis : '');
 
   const bm = r.models[S.best];
   const kpi = [
@@ -811,7 +812,7 @@ function renderModelStrip() {
     const m = r.models[k]; if (!m) return '';
     const err = m.metrics.oos_r2 === null;
     return `<div class="mcard ${k === S.sel ? 'sel' : ''}" data-k="${k}">
-      ${k === S.best ? '<span class="best">最佳</span>' : ''}
+      ${k === S.best ? '<span class="best">区间最优</span>' : ''}
       <div class="nm">${m.name}</div>
       <div class="r2" style="color:${err ? 'var(--bad)' : 'var(--fg)'}">
         ${err ? '失败' : fmtNum(m.metrics.oos_r2, 3)}</div>
@@ -858,7 +859,7 @@ function renderRank() {
                    && (bt < eq * 0.7 || bt < 0);
       const r2col = noR2 ? 'var(--fg3)' : (neg ? 'var(--bad)' : 'var(--fg)');
       return `<tr class="clickable ${k === S.sel ? 'sel' : ''}" data-k="${k}">
-        <td class="l">${x['模型']} ${k === S.best ? '<span class="tag">最佳</span>' : ''}</td>
+        <td class="l">${x['模型']} ${k === S.best ? '<span class="tag">区间最优</span>' : ''}</td>
         <td class="l">${x['流派']}</td>
         <td class="l">${x['可解释']}</td>
         <td class="bar-cell" ${noR2 ? 'title="R² 未定义（窗口内目标无变异）"' :
@@ -1293,52 +1294,19 @@ async function applyParams() {
   $('progressWrap').hidden = false;
   setProgress('重新学习 ' + spec.name, 0.02, '');
   try {
-    const r = await api('/api/refit', {
+    const m = S.result.meta;
+    const r = await api('/api/analyze', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: S.result.code, model: k, params: o,
-                              max_rebal: selectedRebal(),
-                              auto_equity: selectedAuto(),
-                              // 与主分析同窗口，否则重算会落在默认窗口上
-                              start: windowStart(selectedWindowYears()),
-                              end: null })
+      body: JSON.stringify({ code: S.result.code, models: m.models,
+        params: Object.assign({}, m.params, { [k]: o }),
+        max_rebal: m.max_rebal, auto_equity: m.auto_equity,
+        start: m.window_requested || m.start, end: m.end })
     });
-    await pollRefit(r.job_id, k);
+    if (r.cached) applyResult(r.result);
+    else await poll(r.job_id);
   } catch (e) {
     $('progressWrap').hidden = true;
     showAlert('重新学习失败：' + e.message);
-  }
-}
-
-async function pollRefit(jid, k) {
-  for (;;) {
-    await new Promise(r => setTimeout(r, 800));
-    const j = await api('/api/job/' + jid);
-    setProgress(j.stage, j.progress, j.detail);
-    if (j.status === 'done') {
-      const r = await api('/api/result/' + jid);
-      $('progressWrap').hidden = true;
-      S.result.models[k] = r.result;          // 就地替换
-      // 重算排名。键名必须加引号：'样本外R²' 含上标字符，不是合法标识符。
-      S.result.rank = Object.values(S.result.models).map(m => ({
-        key: m.key, '模型': m.name, '流派': m.family,
-        '可解释': m.interpretable ? '是' : '否',
-        '样本外R²': m.metrics.oos_r2, '样本外TE': m.metrics.oos_te,
-        '窗口内R²': m.metrics.fit_r2_mean, '窗口内TE': m.metrics.fit_te_mean,
-        '方向一致率': m.metrics.win, '耗时': m.metrics.elapsed,
-      })).sort((a, b) => (b['样本外R²'] ?? -9) - (a['样本外R²'] ?? -9));
-      const stillBest = Object.keys(S.result.models).reduce((a, x) =>
-        (S.result.models[x].metrics.oos_r2 ?? -9) > (S.result.models[a].metrics.oos_r2 ?? -9) ? x : a,
-        Object.keys(S.result.models)[0]);
-      S.best = stillBest;
-      renderModelStrip(); renderRank(); renderSelected(); renderHead();
-      showAlert(`「${r.result.name}」已用新参数重新学习，样本外 R² = ${
-        fmtNum(r.result.metrics.oos_r2, 4)}。当前最佳仍是「${S.result.models[stillBest].name}」。`);
-      return;
-    }
-    if (j.status === 'error') {
-      $('progressWrap').hidden = true;
-      showAlert('重新学习失败：' + j.error); return;
-    }
   }
 }
 

@@ -33,6 +33,8 @@ from typing import Dict, Iterable, Optional
 
 import numpy as np
 import pandas as pd
+from . import storage
+from .fileio import _atomic_csv_write, _os_replace_retry
 
 warnings.filterwarnings("ignore")
 
@@ -434,22 +436,8 @@ def fetch_universe(codes: Iterable[str], start: str, end: Optional[str] = None,
 
 
 def data_stamp() -> str:
-    """
-    底层数据的粗粒度指纹（P1-05）。
-
-    结果缓存旧键里只有 (基金, 模型集, 参数, 精度)，**不含底层数据摘要**：
-    行情追加或重抓之后，缓存键不变，页面会一直显示旧结果，看起来像"刷新无效"。
-    这里用数据目录里 CSV 的「文件数 + 最大 mtime」做指纹 —— 任何一次写入都会
-    改变它，于是缓存键随之改变，结果自然刷新。开销仅一次目录 stat。
-    """
-    try:
-        fs = list(C.DATA_DIR.glob("*.csv"))
-        if not fs:
-            return "empty"
-        mx = max(f.stat().st_mtime for f in fs)
-        return f"{len(fs)}:{int(mx)}"
-    except Exception:                                   # noqa: BLE001
-        return "unknown"
+    """DuckDB 数据内容指纹；读取及元信息更新不会使结果缓存失效。"""
+    return storage.stamp()
 
 
 # ------------------------------------------------------------------ 清洗对齐
@@ -548,117 +536,53 @@ def _fingerprint(meta: dict) -> dict:
 
 
 def _cache_meta_valid(name: str, meta: dict) -> bool:
-    """
-    缓存是否仍有效。
-
-    用 sidecar 元数据而不是把版本号塞进文件名，是为了**不作废已有的 14 份
-    panel 缓存**——它们仍然有效，强行改名会让离线环境（无 akshare）直接跑不起来。
-    没有元数据文件的旧缓存一律视为有效。
-    """
-    fp = _cache_meta_path(name)
-    if not fp.exists():
-        return True
-    try:
-        saved = json.loads(fp.read_text(encoding="utf-8"))
-    except Exception:               # noqa: BLE001
-        return True
+    """优先校验数据库口径；仅为旧 CSV 迁移读取 sidecar。"""
+    saved = storage.metadata(name)
+    if saved is None:
+        fp = _cache_meta_path(name)
+        if not fp.exists():
+            return True
+        try:
+            saved = json.loads(fp.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
     return _fingerprint(saved) == _fingerprint(meta)
 
 
 def _cache_meta_write(name: str, meta: dict):
-    try:
-        _cache_meta_path(name).write_text(
-            json.dumps(meta, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-    except Exception:               # noqa: BLE001
-        pass
+    if storage.metadata(name) is None:
+        _cache_meta_path(name).write_text(json.dumps(meta), encoding="utf-8")
+    else:
+        storage.write_metadata(name, meta)
 
 
 def cache_info(name: str) -> dict:
-    """
-    读某个缓存的描述性信息（P1-05 / N-07）：抓取时间、数据末日、行数、缺失资产。
-
-    用途：回答"这份缓存是什么时候抓的、抓到哪天、缺了哪些资产" ——
-    旧缓存只有一个版本号，出问题时无法判断该重抓还是该补取。
-    """
-    fp = _cache_meta_path(name)
-    if not fp.exists():
-        return {}
-    try:
-        return (json.loads(fp.read_text(encoding="utf-8")) or {}).get("info", {})
-    except Exception:                                    # noqa: BLE001
-        return {}
+    return (storage.metadata(name) or {}).get("info", {})
 
 
 def _cache_info_write(name: str, info: dict):
-    """把描述性信息合并进现有 meta（不触碰参与判等的指纹字段）。"""
-    fp = _cache_meta_path(name)
-    try:
-        cur = json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {}
-    except Exception:                                    # noqa: BLE001
-        cur = {}
+    cur = storage.metadata(name) or {}
     cur.setdefault("info", {}).update(info)
-    _cache_meta_write(name, cur)
+    storage.write_metadata(name, cur)
 
 
-def _os_replace_retry(src: Path, dst: Path, retries: int = 6):
-    """os.replace 带重试。Windows 下目标被另一线程短暂占用会抛 WinError 32。"""
-    import os
-    import time
-    for i in range(retries):
-        try:
-            os.replace(src, dst)
-            return
-        except OSError:
-            if i == retries - 1:
-                raise
-            time.sleep(0.05 * (i + 1))
-
-
-def _atomic_csv_write(df: pd.DataFrame, path: Path):
-    """
-    原子写 CSV：先写同目录临时文件再 os.replace。
-
-    为什么需要：直接 to_csv 到目标路径，进程在写一半时被杀会留下**半截 CSV**，
-    下次读取虽然能兜底重建，但会白白多一次网络请求。
-    临时名必须每次唯一 —— Web 端是多线程，只加 pid 仍会撞名。
-    """
-    import os
-    import threading
-    import uuid
-    tmp = path.with_name(f"{path.name}.{os.getpid()}."
-                         f"{threading.get_ident()}.{uuid.uuid4().hex[:6]}.tmp")
-    try:
-        df.to_csv(tmp, encoding="utf-8-sig")
-        _os_replace_retry(tmp, path)
-    finally:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-
-
-def _cached(name: str, builder, meta: Optional[dict] = None):
-    fp = C.DATA_DIR / f"{name}.csv"
-    stale = meta is not None and not _cache_meta_valid(name, meta)
-    if stale:
-        print(f"[data] 缓存 {name} 口径已变更，重新抓取")
-    if fp.exists() and not stale:
-        try:
-            df = pd.read_csv(fp, index_col=0, parse_dates=True)
-            if len(df):
-                # ★ 命中旧缓存时也要补写元数据，否则版本守卫永远不会被"武装"：
-                # 之后有人改 DATA_CACHE_VERSION 时，_cache_meta_valid 会因为
-                # 找不到元数据而一律判为有效，缓存照样命中，守卫形同虚设。
-                if meta is not None:
-                    _cache_meta_write(name, _with_info(meta, df))
-                return df
-        except Exception as e:      # noqa: BLE001
-            print(f"[data] 缓存 {name} 损坏（{type(e).__name__}），重新构建")
-    df = builder()
-    _atomic_csv_write(df, fp)
-    if meta is not None:
-        _cache_meta_write(name, _with_info(meta, df))
-    return df
+def _cached(name: str, builder, meta: Optional[dict] = None, refresh=False):
+    """DuckDB 为唯一写入目标；兼容导入旧 CSV，刷新失败保留上一份数据。"""
+    if not refresh and (meta is None or _cache_meta_valid(name, meta)):
+        frame = storage.read(name)
+        if frame is not None:
+            return frame
+        legacy = C.DATA_DIR / f"{name}.csv"
+        if legacy.exists():
+            frame = pd.read_csv(legacy, index_col=0, parse_dates=True)
+            if len(frame):
+                saved = _cache_meta_path(name)
+                old_meta = json.loads(saved.read_text(encoding="utf-8")) if saved.exists() else {}
+                storage.write(name, frame, _with_info(meta or old_meta, frame))
+                return frame
+    frame = builder()
+    storage.write(name, frame, _with_info(meta or {}, frame))
+    return frame
 
 
 def _with_info(meta: dict, df) -> dict:
@@ -708,18 +632,13 @@ def load_index_universe(start: Optional[str] = None,
     cache_name = f"index_universe_{start}" + (f"_to{end}" if end else "")
     meta = {"v": C.DATA_CACHE_VERSION, "n_candidates": len(C.NAME_OF),
             "start": start, "end": end}
-    if refresh:
-        for p in (C.DATA_DIR / f"{cache_name}.csv",
-                  C.DATA_DIR / f"{cache_name}.meta.json"):
-            if p.exists():
-                p.unlink()
 
     def build() -> pd.DataFrame:
         if verbose:
             print(f"[data] 抓取候选指数池 {len(C.NAME_OF)} 个 ...")
         return fetch_universe(C.NAME_OF.keys(), start, end, verbose=verbose)
 
-    df = _cached(cache_name, build, meta=meta)
+    df = _cached(cache_name, build, meta=meta, refresh=refresh)
     # ★ 缺失资产必须留痕（N-07）：部分行情失败会静默得到一个"不完整指数池"，
     #   下游的覆盖率过滤会把它们当"中途停编"剔除，掩盖了真实原因是抓取失败。
     #   无条件写入（空列表 = 无缺失），否则"没这个字段"和"没缺失"分不清。
@@ -754,11 +673,6 @@ def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
     cache_name = f"fund_nav_{fund_code}_{start}{suffix}"
     meta = {"v": C.DATA_CACHE_VERSION, "code": fund_code, "start": start,
             "basis": basis}
-    if refresh:
-        for p in (C.DATA_DIR / f"{cache_name}.csv",
-                  C.DATA_DIR / f"{cache_name}.meta.json"):
-            if p.exists():
-                p.unlink()
 
     class _DegradedNav(Exception):
         """总回报口径不可用。绝不能把退化结果写进 total 缓存名下。"""
@@ -777,7 +691,7 @@ def load_fund_nav_cached(fund_code: str, start: Optional[str] = None,
         return fetch_fund_nav(fund_code, start).to_frame()
 
     try:
-        df = _cached(cache_name, build, meta=meta)
+        df = _cached(cache_name, build, meta=meta, refresh=refresh)
     except _DegradedNav as e:
         print(f"[data] ⚠ {e}；本次退回累计净值口径，结果【未缓存】")
         return fetch_fund_nav(fund_code, start)

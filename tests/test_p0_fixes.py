@@ -367,7 +367,8 @@ def t6():
         idx = pd.bdate_range("2020-01-01", periods=5, name="date")
         return pd.DataFrame({"a": range(5), "b": range(5)}, index=idx)
 
-    name = "_t6layered"
+    import uuid
+    name = "_t6layered_" + uuid.uuid4().hex
     for suffix in (".csv", ".meta.json"):
         f = C.DATA_DIR / f"{name}{suffix}"
         if f.exists():
@@ -393,6 +394,11 @@ def t6():
         if f.exists():
             f.unlink()
 
+    from src import storage
+    with storage.connection() as db:
+        db.execute("DELETE FROM prices WHERE dataset=?", [name])
+        db.execute("DELETE FROM datasets WHERE name=?", [name])
+
     # ---- 分层结构：指数池必须与基金净值分开存放
     import inspect
     sig_lp = inspect.signature(D.load_panel)
@@ -409,7 +415,7 @@ def t6():
     # 并发写同一缓存文件（两个相同请求不同 job_id 会撞同一路径）
     import pickle, threading
     from src import config as C
-    from webapp.app import _atomic_pickle_dump
+    from src.fileio import _atomic_pickle_dump
     fp = C.DATA_DIR / "_t6probe.pkl"
     def w(i):
         for _ in range(30):

@@ -35,7 +35,7 @@ def _git_head(root: Optional[Path] = None) -> Optional[str]:
 
 def _lib_versions() -> Dict[str, Optional[str]]:
     out: Dict[str, Optional[str]] = {}
-    for mod in ("numpy", "pandas", "scipy", "sklearn", "matplotlib"):
+    for mod in ("numpy", "pandas", "scipy", "sklearn", "matplotlib", "duckdb"):
         try:
             m = __import__(mod)
             out[mod] = getattr(m, "__version__", "?")
@@ -85,15 +85,10 @@ def _jsonable(v):
 def data_summary() -> Dict[str, Any]:
     """数据侧指纹：与结果缓存键共用一个 data_stamp，便于交叉比对。"""
     try:
-        from . import config as C, data as D
-        files = sorted(Path(C.DATA_DIR).glob("*.csv"))
+        from . import config as C, data as D, storage
         return {
             "data_stamp": D.data_stamp(),
-            "n_csv": len(files),
-            "n_fund_nav_cached": len([f for f in files
-                                      if f.name.startswith("fund_nav_")]),
-            "n_index_cache": len([f for f in files
-                                  if f.name.startswith("index_universe_")]),
+            **storage.summary(),
             "start_date": getattr(C, "START_DATE", None),
             # ★ 分析窗口（2026-10-12）：START_DATE 是**滚动**的，只记录它无法
             #   判断"这次跑的是几年窗口"。复现需要窗口年数与抓取起点一起记。

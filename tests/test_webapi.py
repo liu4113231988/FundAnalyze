@@ -19,8 +19,8 @@ sys.path.insert(0, ".")
 
 import json
 import pandas as pd
-from src.webapi import (analyze, refit_single, correlation_block,
-                        nav_block, get_fund_name)
+from src.webapi import analyze, refit_single, get_fund_name
+from src.payloads import correlation_block, nav_block
 from src import config as C
 from src import data as D
 from src.models import MODEL_ORDER

@@ -83,7 +83,7 @@
 
 输入任意 6 位基金代码，网页会给出：净值走势、与候选指数池的相关性分析
 （定义 47 个，按覆盖率过滤后通常剩 40~44 个）、
-**十一种机器学习方法的拟合结果横向对比**，并自动选出样本外表现最好的那个。
+**十一种机器学习方法的拟合结果横向对比**，并标出当前评估区间内样本外表现最好的模型；该排名不代表独立验证后的未来表现。
 
 ```bash
 pip install -r requirements.txt
@@ -99,7 +99,7 @@ python webapp/serve.py --restart        # 启动后浏览器打开 http://127.0.
 | **多模型横向对比** | 同一份数据切分上滚动样本外评估，按样本外 R² 排名 |
 | **模型详情** | 拟合曲线、残差、权重时间演化、当前权重条形图 |
 | **风格漂移** | 拟合权重的结构突变、前后半持仓对比、分年度画像（见 `docs/研究方案.md` §4c） |
-| **超参调节 + 重新学习** | 改任意超参点"重新学习"，结果就地替换并自动重算最佳模型 |
+| **超参调节 + 重新学习** | 改任意超参点"重新学习"，沿用原分析配置刷新全套结果、排名及诊断 |
 | **手动选优** | 点任意模型卡或表格行查看详情，点"设为最佳模型"锁定基准 |
 
 **分析窗口**：右上角可切换「近 2 / 3 / 5 / 10 年」，默认 **5 年**、下限 **2 年**
@@ -131,10 +131,12 @@ pip install -r requirements.txt
 
 # 2. 数据预热（可选）：把基金净值与指数池抓到本地，之后可离线分析
 python warm_cache.py                # 预热默认样本；也可指定代码 / --refresh
-# 数据落在 output/data/：
-#   index_universe_{start}.csv   指数池，**全局一份**（与基金无关）
-#   fund_nav_{code}_{start}.csv  基金净值，每只一份（~50 KB）
-#   面板 = 两者对齐后即时重建，不落盘 —— 存储量与抓取量都是 O(基金+指数)
+# 行情直接存入 output/data/market.duckdb，无 Parquet 中间层。
+# 已有 CSV 可执行 python migrate_cache.py 批量导入；源文件保留备份。
+# 未批量导入时，首次读取旧行情也会自动导入 DuckDB。
+# prices 表按 dataset / date / asset 存储数值，datasets 表存口径与内容指纹。
+# 面板按需重建；刷新失败不会删除原有数据。
+# Web 与 CLI 使用短连接和文件锁串行访问数据库；模型计算仍可并行。
 
 # 3. 跑 4 只演示基金（首次约 90 秒，之后 6 秒）
 python run.py
@@ -321,7 +323,7 @@ fund-index-lens/
 ```
 fund-index-lens/
 ├── webapp/                     🖥 Web 交互界面
-│   ├── app.py                     Flask 路由（异步任务 + 轮询 + 结果缓存）
+│   ├── app.py                     Flask 路由、HTTP 响应与结果缓存
 │   ├── serve.py                   启动/重启脚本（自动清理端口占用）
 │   └── static/
 │       ├── index.html             单页结构
@@ -331,9 +333,16 @@ fund-index-lens/
 │
 ├── src/
 │   ├── models.py               ⭐ 多模型引擎 + 滚动样本外评估
-│   ├── webapi.py               ⭐ 分析编排：净值/相关性/模型/结论
+│   ├── webapi.py               ⭐ 分析与回测用例编排（无 HTTP 依赖）
+│   ├── payloads.py                图表、指标和结论的结果组装
+│   ├── jobs.py                    后台任务状态、去重、限流及线程生命周期
+│   ├── webparams.py               Web 模型参数校验
+│   ├── window.py                  CLI / Web 共用日期窗口规则
+│   ├── storage.py                 DuckDB 事务、进程间锁和数据读写
+│   ├── fileio.py                  结果缓存及导出文件原子写入
+│   ├── runinfo.py                 代码、依赖与数据库运行记录
 │   ├── data.py                    数据抓取与对齐
-│   ├── rbsa.py                   原始 RBSA（两阶段约束回归）
+│   ├── rbsa.py                   RBSA 兼容入口，复用 models.py 引擎
 │   ├── signal.py                 三通道信号 + 拟合健康门控
 │   ├── backtest.py               回测 + 逐方案恒定仓位对照
 │   ├── experiments.py            E1~E4 诊断实验
@@ -345,6 +354,9 @@ fund-index-lens/
 │   ├── bench_models.py            各模型计时与排名
 │   ├── smoke_models.py            多模型冒烟
 │   ├── test_webapi.py             后端端到端（payload 完整性）
+│   ├── test_jobs.py               调度、失败回收、终态保护和日期一致性
+│   ├── test_storage_routes.py     DuckDB 迁移、事务、并发与接口行为
+│   ├── test_refit.js              重算配置及完整结果刷新
 │   ├── test_p0_fixes.py           ⭐ 离线回归：对照口径/边界/健康门控（有退出码）
 │   └── dom_check.js               前端 DOM 渲染（jsdom，14 项断言）
 │
@@ -353,10 +365,12 @@ fund-index-lens/
 ├── run_walkforward.py           ⭐ 按管理人分折验证参数是否过拟合
 ├── warm_cache.py                数据预热（批量抓取到本地，支持离线分析）
 ├── build_report.py              生成 HTML 报告
-└── docs/研究方案.md
+└── docs/                       研究方案与架构设计
 ```
 
 ---
+
+模块职责与扩展约束见 [架构设计](docs/架构设计.md)。
 
 ## 主要实验结论
 
@@ -413,3 +427,13 @@ Web 界面刻意不提供买卖信号，只做风格穿透与模型对比——
 
 回测按单边 0.15% 计提交易成本，对场外基金申赎（申购 1.5% / 赎回 0.5%）而言严重偏乐观，
 本框架实际只适用于场内 ETF / LOF 或 C 类份额。
+
+### 数据与回测边界（2026-10-29）
+
+基金总回报仍使用事后月度锚点校准，未来锚点可能改写历史日收益；
+模型的滚动样本外切分不等于端到端历史时点可得回测。页面头部和 API meta
+会标明此限制。修复此口径需要可靠的分红、拆分事件及披露时间数据，
+不能用前向填充校准系数替代，否则会把月度校准差额制造成单日收益。
+
+离线验证：`python tests/test_storage_routes.py`、`python tests/test_p0_fixes.py`、
+`python tests/test_regressions.py`。行情迁移不涉及研究报告、持仓明细和结果导出的 CSV。

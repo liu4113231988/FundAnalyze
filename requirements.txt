@@ -14,3 +14,5 @@ matplotlib>=3.8,<4.0
 flask>=3.0,<4.0          # Web 界面（webapp/）
 flask-cors>=4.0,<7.0     # 允许跨域，便于前端单独部署
 requests>=2.31,<3.0
+
+duckdb>=1.4,<2.0

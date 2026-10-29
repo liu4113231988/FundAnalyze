@@ -59,6 +59,31 @@ def _iso(x, label: str) -> str:
     return s
 
 
+def parse_window(start=None, end=None, min_days=None, today=None):
+    """CLI 与 Web 共用 ISO 日期校验；None 表示沿用默认窗口。"""
+    def date_value(value, label):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return pd.Timestamp(_iso(value, label))
+
+    s = date_value(start, "起始日期")
+    e = date_value(end, "结束日期")
+    effective_end = e if e is not None else pd.Timestamp(
+        today if today is not None else _dt.date.today()).normalize()
+    if s is not None:
+        if s >= effective_end:
+            raise ValueError(f"起始日 {s.date()} 需早于结束日 {effective_end.date()}")
+        minimum = C.MIN_WINDOW_DAYS if min_days is None else int(min_days)
+        days = int((effective_end - s).days)
+        if days < minimum:
+            raise ValueError(
+                f"分析区间只有 {days} 天（约 {days / 365.25:.1f} 年），"
+                f"最短需 {minimum} 天（{C.MIN_WINDOW_YEARS} 年）。"
+                "样本太短时拟合窗口与预热会吃掉大部分数据。")
+    return (s.strftime("%Y-%m-%d") if s is not None else None,
+            e.strftime("%Y-%m-%d") if e is not None else None)
+
+
 def add_window_args(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """给 argparse 加统一的窗口参数（返回同一个 parser 以便链式调用）。"""
     g = ap.add_argument_group(
@@ -94,21 +119,7 @@ def resolve_window(years: Optional[float] = None,
     else:
         s = C.START_DATE
 
-    e = _iso(end, "窗口结束日") if end else None
-    try:
-        s_ts = pd.Timestamp(s)
-    except (ValueError, TypeError):
-        raise ValueError(f"窗口起始日 {s!r} 不是有效日期（应为 YYYY-MM-DD）")
-    e_eff = pd.Timestamp(e) if e else pd.Timestamp.today()
-    if e_eff <= s_ts:
-        raise ValueError(f"窗口起始日 {s_ts.date()} 需早于结束日 {e_eff.date()}")
-    days = int((e_eff - s_ts).days)
-    if days < C.MIN_WINDOW_DAYS:
-        raise ValueError(
-            f"分析窗口只有 {days} 天（约 {days / 365.25:.1f} 年），"
-            f"最短需 {C.MIN_WINDOW_DAYS} 天（{C.MIN_WINDOW_YEARS} 年）。"
-            f"样本太短时拟合窗口与预热会吃掉大部分数据。")
-    return s, e
+    return parse_window(s, end)
 
 
 def apply_window(args, verbose: bool = True) -> Tuple[str, Optional[str]]:
