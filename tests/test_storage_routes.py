@@ -1,16 +1,19 @@
 """DuckDB 迁移、事务与路由资源生命周期的离线回归。"""
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import json
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 import pandas as pd
-from src import config as C, data as D, storage
-from src.jobs import JobStore, JobRunner
-from webapp import app as web
+import market_research.config as C
+import market_research.data.marketdata as D
+import market_research.data.storage as storage
+from market_research.tasks.jobs import JobStore, JobRunner
+import market_research.services.analysis as web
+from market_research.api.app import app
+from fastapi.testclient import TestClient
 
 
 class StorageTests(unittest.TestCase):
@@ -53,7 +56,7 @@ class StorageTests(unittest.TestCase):
         self.assertIsNotNone(storage.read("two"))
 
     def test_run_summary_uses_database_instead_of_csv_backups(self):
-        from src.runinfo import data_summary
+        from market_research.research.runinfo import data_summary
         storage.write("fund_nav_example", self.frame, {})
         storage.write("index_universe_example", self.frame, {})
         self.frame.to_csv(C.DATA_DIR / "fund_nav_old_backup.csv")
@@ -76,8 +79,11 @@ class StorageTests(unittest.TestCase):
 
 class RouteTests(unittest.TestCase):
     def setUp(self):
-        self.client = web.app.test_client()
-        self.runner = JobRunner(JobStore(), max_jobs=1)
+        self.client = TestClient(app)
+        class TestRunner(JobRunner):
+            def submit(self, code, models, operation, arguments, key=None):
+                return super().submit(code, models, lambda jid:web.execute(operation,arguments,jid), key=key)
+        self.runner = TestRunner(JobStore(), max_jobs=1)
         self.patch = patch.object(web, "RUNNER", self.runner)
         self.patch.start()
         self.jobs = patch.object(web, "JOBS", self.runner.store)
@@ -89,7 +95,7 @@ class RouteTests(unittest.TestCase):
 
     def test_cache_identity(self):
         args = ("110022", ["ridge"], {})
-        self.assertNotEqual(web._result_cache_path(*args, None), web._result_cache_path(*args, 0))
+        self.assertNotEqual(web.result_cache_path(*args, None), web.result_cache_path(*args, 0))
 
     def test_cached_requests_do_not_consume_slots(self):
         from unittest.mock import Mock
@@ -97,18 +103,18 @@ class RouteTests(unittest.TestCase):
         path = Mock()
         path.exists.return_value = True
         path.open.side_effect = lambda *a: io.BytesIO(pickle.dumps({"meta": {}}))
-        with patch.object(web, "_result_cache_path", return_value=path), patch.object(D, "data_stamp", return_value="test"):
+        with patch.object(web, "result_cache_path", return_value=path), patch.object(D, "data_stamp", return_value="test"):
             for _ in range(3):
                 self.assertEqual(self.client.post("/api/analyze", json={"code": "110022"}).status_code, 200)
         self.assertTrue(self.runner._slots.acquire(False))
         self.runner._slots.release()
 
     def test_jobs_merge_only_identical_parameters(self):
-        with patch("src.jobs.Thread.start"), patch.object(D, "data_stamp", return_value="test"):
+        with patch("market_research.tasks.jobs.Thread"), patch.object(D, "data_stamp", return_value="test"):
             body = {"code": "110022", "models": ["ridge"], "params": {"ridge": {"alpha_scale": 1}}}
             first = self.client.post("/api/analyze", json=body)
             same = self.client.post("/api/analyze", json=body)
-            self.assertEqual(first.json["job_id"], same.json["job_id"])
+            self.assertEqual(first.json()["job_id"], same.json()["job_id"])
             body["params"]["ridge"]["alpha_scale"] = 2
             self.assertEqual(self.client.post("/api/analyze", json=body).status_code, 429)
             self.assertEqual(self.client.post("/api/refit", json={"code": "110022", "model": "ridge"}).status_code, 429)
@@ -116,7 +122,7 @@ class RouteTests(unittest.TestCase):
 
     def test_all_calculation_routes_execute_background_work(self):
         with tempfile.TemporaryDirectory(dir=C.ROOT / "output") as directory:
-            with patch.object(web, "_result_cache_path", return_value=Path(directory) / "result.pkl"), patch.object(D, "data_stamp", return_value="test"):
+            with patch.object(web, "result_cache_path", return_value=Path(directory) / "result.pkl"), patch.object(D, "data_stamp", return_value="test"):
                 for route, function, body in (
                     ("analyze", "analyze", {"code": "110022", "models": ["ridge"]}),
                     ("refit", "refit_single", {"code": "110022", "model": "ridge"}),
@@ -125,13 +131,13 @@ class RouteTests(unittest.TestCase):
                     with self.subTest(route=route), patch.object(web, function, return_value={"meta": {}, "case": route}) as work:
                         response = self.client.post("/api/" + route, json=body)
                         self.assertEqual(response.status_code, 200)
-                        jid = response.json["job_id"]
+                        jid = response.json()["job_id"]
                         for thread in threading.enumerate():
                             if thread.name == "job-" + jid:
                                 thread.join(timeout=5)
                         result = self.client.get("/api/result/" + jid)
                         self.assertEqual(result.status_code, 200)
-                        self.assertEqual(result.json["result"]["case"], route)
+                        self.assertEqual(result.json()["result"]["case"], route)
                         work.assert_called_once()
                         self.assertTrue(self.runner._slots.acquire(False))
                         self.runner._slots.release()

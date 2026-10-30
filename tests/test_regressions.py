@@ -15,7 +15,6 @@ import warnings
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:                                             # noqa: BLE001
@@ -24,11 +23,11 @@ except Exception:                                             # noqa: BLE001
 import numpy as np
 import pandas as pd
 
-from src import config as C
-from src.backtest import run_backtest, perf_metrics
-from src.signal import SignalEngine
-from src.models import _score, _constrained_fit, ModelZoo
-from src.data import total_return_index
+import market_research.config as C
+from market_research.modeling.backtest import run_backtest, perf_metrics
+from market_research.modeling.signals import SignalEngine
+from market_research.modeling.models import _score, _constrained_fit, ModelZoo
+from market_research.data.marketdata import total_return_index
 
 FAILS = []
 
@@ -188,8 +187,7 @@ def r5():
 # ============================================================ R6 P1-06 参数校验
 def r6():
     print("\nR6 · P1-06 API 参数：非法输入停在 4xx，语义三态分清")
-    from src.webparams import (_parse_max_rebal, _parse_auto_equity,
-                            _check_params)
+    from market_research.validation.parameters import _parse_max_rebal, _parse_auto_equity, _check_params
 
     chk(_parse_max_rebal(None, default=None) is None,
         "省略 max_rebal → 用配置默认（60）")
@@ -221,7 +219,7 @@ def r6():
 # ============================================================ R7 P0-03 时间切分
 def r7():
     print("\nR7 · P0-03 时间向前验证：训练期严格早于测试期")
-    from src.walkforward import time_folds
+    from market_research.research.walkforward import time_folds
     days = pd.bdate_range("2010-01-04", periods=1500)
     folds = time_folds(days, n_folds=3, purge_days=20, min_train_frac=0.4)
     chk(len(folds) == 3, f"切出 {len(folds)} 折")
@@ -240,7 +238,7 @@ def r7():
 # ============================================================ R8 P2-02 朴素基准
 def r8():
     print("\nR8 · P2-02 风格画像必须胜过朴素基准（基准可计算）")
-    from src.experiments import naive_benchmarks
+    from market_research.research.experiments import naive_benchmarks
     rng = np.random.default_rng(4)
     n, k = 900, 6
     idx = pd.bdate_range("2016-01-04", periods=n, name="date")
@@ -267,7 +265,7 @@ def r8():
 # ============================================================ R9 P1-03 多重比较
 def r9():
     print("\nR9 · P1-03 多重比较校正")
-    from src.robustness import multiplicity_adjust
+    from market_research.research.robustness import multiplicity_adjust
     ps = [0.04] * 10                       # 10 个"看起来显著"的结果
     df, note = multiplicity_adjust(ps, alpha=0.05, method="bonferroni")
     chk(int(df["拒绝原假设"].sum()) == 0,
@@ -282,7 +280,7 @@ def r9():
 # ============================================================ R10 选参不塌
 def r10():
     print("\nR10 · R² 变为 NaN 后，自适应仓位选参不得塌成 None")
-    from src.models import estimate_equity, fit_window
+    from market_research.modeling.models import estimate_equity, fit_window
     rng = np.random.default_rng(11)
     n, k = 300, 4
     cols = [f"a{i}" for i in range(k)]
@@ -300,7 +298,7 @@ def r10():
 # ============================================================ R11 健康门控遇 NaN
 def r11():
     print("\nR11 · R² 为 NaN 时，健康门控必须判为不可信而不是被 ffill 掩盖")
-    from src.signal import SignalEngine, build_decision, health_stats
+    from market_research.modeling.signals import SignalEngine, build_decision, health_stats
     rng = np.random.default_rng(5)
     n = 700
     idx = pd.bdate_range("2016-01-01", periods=n)
@@ -337,10 +335,10 @@ def r11():
 # ============================================================ R12 分析窗口与风格漂移
 def r12():
     print("\nR12 · 分析窗口：默认近 5 年 / 下限 2 年 / 抓取起点与分析起点解耦")
-    from src import config as C
-    from src.data import fetch_start_for
-    from src.experiments import style_drift
-    from src.window import parse_window as _parse_window
+    import market_research.config as C
+    from market_research.data.marketdata import fetch_start_for
+    from market_research.research.experiments import style_drift
+    from market_research.validation.window import parse_window as _parse_window
 
     # 1) 抓取起点必须取**较早者**。反过来看似只差缓存命中率，实际是：
     #    缓存名带 start，让它跟着窗口滚动 → 每次改窗口甚至每天运行都全 miss，
@@ -373,7 +371,7 @@ def r12():
 
     # 3) 面板确实按窗口裁剪（需要本地缓存；没有缓存则跳过而不是误报失败）
     try:
-        from src.data import load_panel
+        from market_research.data.marketdata import load_panel
         p2 = load_panel("110022", start=C._rolling_start(2), verbose=False)
         p5 = load_panel("110022", start=C._rolling_start(5), verbose=False)
         chk(len(p2) < len(p5),
@@ -410,9 +408,9 @@ def r12():
 # ============================================================ R13 窗口 CLI 解析
 def r13():
     print("\nR13 · 分析窗口：CLI 解析、下限校验、抓取起点不随窗口漂移")
-    from src import config as C
-    from src.data import fetch_start_for
-    from src.window import resolve_window
+    import market_research.config as C
+    from market_research.data.marketdata import fetch_start_for
+    from market_research.validation.window import resolve_window
 
     # 无参数 → 跟随配置
     s, e = resolve_window()
@@ -462,7 +460,7 @@ def r13():
 
     # 运行时覆盖 C.START_DATE 必须对 load_panel 生效（惰性解析的前提）
     try:
-        from src.data import load_panel
+        from market_research.data.marketdata import load_panel
         p5 = load_panel("110022", verbose=False)
         C.START_DATE = C._rolling_start(2)
         p2 = load_panel("110022", verbose=False)

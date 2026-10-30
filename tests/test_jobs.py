@@ -1,12 +1,11 @@
 """共享任务生命周期和 CLI/Web 边界的行为测试。"""
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
-from src.jobs import JobRunner, JobStore, JobsBusy
-from src.window import parse_window, resolve_window
+from market_research.tasks.jobs import JobRunner, JobStore, JobsBusy
+from market_research.validation.window import parse_window, resolve_window
 
 
 class JobTests(unittest.TestCase):
@@ -17,7 +16,7 @@ class JobTests(unittest.TestCase):
     def test_worker_success_and_failure_release_capacity(self):
         def immediate_thread(target, **kwargs):
             return SimpleNamespace(start=target)
-        with patch("src.jobs.Thread", side_effect=immediate_thread), patch("src.jobs.traceback.print_exc"):
+        with patch("market_research.tasks.jobs.Thread", side_effect=immediate_thread), patch("market_research.tasks.jobs.traceback.print_exc"):
             jid, merged = self.runner.submit("110022", ["ridge"], lambda jid: {"answer": 42})
             self.assertFalse(merged)
             self.assertEqual(self.store.get(jid)["result"], {"answer": 42})
@@ -30,7 +29,7 @@ class JobTests(unittest.TestCase):
             self.assertEqual(self.store.get(final)["status"], "done")
 
     def test_start_and_creation_failures_release_capacity(self):
-        with patch("src.jobs.Thread.start", side_effect=RuntimeError("thread unavailable")):
+        with patch("market_research.tasks.jobs.Thread.start", side_effect=RuntimeError("thread unavailable")):
             with self.assertRaises(RuntimeError):
                 self.runner.submit("110022", ["ridge"], lambda jid: {})
         with patch.object(self.store, "create", side_effect=RuntimeError("store unavailable")):
@@ -41,7 +40,7 @@ class JobTests(unittest.TestCase):
 
     def test_concurrent_duplicates_create_only_one_worker(self):
         from concurrent.futures import ThreadPoolExecutor
-        with patch("src.jobs.Thread") as thread:
+        with patch("market_research.tasks.jobs.Thread") as thread:
             with ThreadPoolExecutor(max_workers=8) as pool:
                 results = list(pool.map(lambda _: self.runner.submit("110022", ["ridge"], lambda jid: {}, key="same"), range(8)))
             self.assertEqual(len({jid for jid, _ in results}), 1)
@@ -51,9 +50,9 @@ class JobTests(unittest.TestCase):
                 self.runner.submit("110022", ["ridge"], lambda jid: {}, key="different")
 
     def test_timeout_cannot_be_overwritten_by_late_success(self):
-        with patch("src.jobs.time.time", return_value=100):
+        with patch("market_research.tasks.jobs.time.time", return_value=100):
             jid = self.store.create("110022", ["ridge"])
-        with patch("src.jobs.time.time", return_value=100 + self.store.JOB_TIMEOUT_SEC + 1):
+        with patch("market_research.tasks.jobs.time.time", return_value=100 + self.store.JOB_TIMEOUT_SEC + 1):
             self.assertEqual(self.store.get(jid)["status"], "error")
             self.store.update(jid, stage="late progress")
             self.store.finish(jid, {"late": True})

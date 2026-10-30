@@ -1,4 +1,4 @@
-/* Fund Lens · 前端逻辑 */
+/* Market Research · 前端逻辑 */
 'use strict';
 
 // ==================================================================== 全局状态
@@ -534,11 +534,17 @@ async function checkName(code) {
   $('searchForm').onsubmit = e => {
     e.preventDefault();
     const c = $('codeInput').value.trim();
+    if (window.MarketApp && MarketApp.kind !== 'fund') { MarketApp.submit(c); return; }
     if (!/^\d{6}$/.test(c)) { showAlert('请输入 6 位数字基金代码，例如 110022'); return; }
     checkName(c);      // 代码存在性提示（异步，不阻塞）
     run(c);
   };
-  sel.onchange = e => { if (e.target.value) run(e.target.value); };
+  sel.onchange = e => {
+    if (!e.target.value) return;
+    $('codeInput').value = e.target.value;
+    if (window.MarketApp && MarketApp.kind !== 'fund') MarketApp.submit(e.target.value);
+    else run(e.target.value);
+  };
 
   $('btnRefresh').onclick = () => S.result && run(S.result.code, { refresh: true });
   $('btnReLearn').onclick = () => S.result && run(S.result.code, { force: true });
@@ -550,19 +556,7 @@ async function checkName(code) {
   };
   // 滚动窗口改动 → 只重算相关性区块（/api/corr），不必重跑拟合。
   // 改之前它只是改了个本地变量、本地重绘，后端根本不知道，是个死控件。
-  $('rollWin').onchange = async e => {
-    S.rollWin = +e.target.value || 120;
-    if (!S.result) return;
-    try {
-      const ws = windowStart(selectedWindowYears());
-      const r = await api(
-        `/api/corr?code=${S.result.code}&win=${S.rollWin}&start=${ws}`);
-      S.result.correlation = r.correlation;
-      renderCorr();
-    } catch (err) {
-      showAlert('滚动相关重算失败：' + err.message);
-    }
-  };
+  $('rollWin').onchange = e => updateCorrelation(+e.target.value || 120);
   $('btnApplyParams').onclick = applyParams;
   $('btnResetParams').onclick = () => {
     if (S.sel) delete S.params[S.sel];
@@ -571,6 +565,10 @@ async function checkName(code) {
 
   initBacktestPicker();
   $('btRun').onclick = runBacktest;
+  if (window.MarketApp) MarketApp.init(S.cat, {
+    request: api, alert: showAlert,
+    fund: {invalidate: () => { fundGeneration++; }, hasResult: () => !!S.result, show: () => applyResult(S.result)},
+  });
 })();
 
 // 模型勾选：预设按钮批量勾选，也可逐个自定义
@@ -624,12 +622,36 @@ function updateRunHint() {
     ` · 分析窗口近 ${selectedWindowYears()} 年`;
 }
 
+let fundGeneration = 0;
+let correlationGeneration = 0;
+async function updateCorrelation(win) {
+  S.rollWin = win;
+  const target = S.result;
+  if (!target) return;
+  const token = ++correlationGeneration;
+  const m = target.meta;
+  const query = new URLSearchParams({code: target.code, win,
+    start: m.window_requested || m.start});
+  const end = ('window_requested_end' in m) ? m.window_requested_end : m.end;
+  if (end) query.set('end', end);
+  try {
+    const r = await api('/api/corr?' + query);
+    if (token !== correlationGeneration || S.result !== target) return;
+    target.correlation = r.correlation;
+    renderCorr();
+  } catch (error) {
+    if (token === correlationGeneration && S.result === target)
+      showAlert('滚动相关重算失败：' + error.message);
+  }
+}
+
 // ==================================================================== 运行分析
 async function run(code, opts = {}) {
   opts = opts || {};
   showAlert(null);
   const models = selectedModels();
   if (!models.length) { showAlert('请至少勾选一个模型'); return; }
+  const token = ++fundGeneration;
   const params = JSON.parse(JSON.stringify(S.params));
   $('runBtn').disabled = true;
   $('progressWrap').hidden = false;
@@ -653,17 +675,19 @@ async function run(code, opts = {}) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
+    if (token !== fundGeneration) return;
     if (r.cached && r.result) {
       applyResult(r.result);
       $('progressWrap').hidden = true;
       return;
     }
-    await poll(r.job_id);
+    await poll(r.job_id, token);
   } catch (e) {
+    if (token !== fundGeneration) return;
     showAlert('分析失败：' + e.message);
     $('progressWrap').hidden = true;
   } finally {
-    $('runBtn').disabled = false;
+    if (token === fundGeneration) $('runBtn').disabled = false;
   }
 }
 
@@ -674,15 +698,17 @@ function setProgress(stage, pct, detail) {
   $('pDetail').textContent = detail || '';
 }
 
-async function poll(jid) {
-  for (;;) {
+async function poll(jid, token = fundGeneration) {
+  while (token === fundGeneration) {
     await new Promise(r => setTimeout(r, 900));
     let j;
     try { j = await api('/api/job/' + jid); }
-    catch (e) { showAlert('任务查询失败：' + e.message); $('progressWrap').hidden = true; return; }
+    catch (e) { if (token !== fundGeneration) return; showAlert('任务查询失败：' + e.message); $('progressWrap').hidden = true; return; }
+    if (token !== fundGeneration) return;
     setProgress(j.stage, j.progress, j.detail);
     if (j.status === 'done') {
       const r = await api('/api/result/' + jid);
+      if (token !== fundGeneration) return;
       $('progressWrap').hidden = true;
       applyResult(r.result);
       return;
@@ -699,8 +725,9 @@ function applyResult(res) {
   S.result = res;
   S.best = res.meta.best_model || Object.keys(res.models)[0];
   S.sel = S.best;
+  const visible = !window.MarketApp || MarketApp.kind === 'fund';
   $('empty').hidden = true;
-  $('main').hidden = false;
+  $('main').hidden = !visible;
   renderHead();
   renderInsights();
   renderDrift();
@@ -1290,6 +1317,7 @@ async function applyParams() {
     else if (typeof dflt === 'number') v = Number(v);
     o[pk] = v;
   });
+  const token = ++fundGeneration;
   S.params[k] = o;
   $('progressWrap').hidden = false;
   setProgress('重新学习 ' + spec.name, 0.02, '');
@@ -1300,13 +1328,16 @@ async function applyParams() {
       body: JSON.stringify({ code: S.result.code, models: m.models,
         params: Object.assign({}, m.params, { [k]: o }),
         max_rebal: m.max_rebal, auto_equity: m.auto_equity,
-        start: m.window_requested || m.start, end: m.end })
+        start: m.window_requested || m.start,
+        end: ('window_requested_end' in m) ? m.window_requested_end : m.end })
     });
+    if (token !== fundGeneration) return;
     if (r.cached) applyResult(r.result);
-    else await poll(r.job_id);
+    else await poll(r.job_id, token);
   } catch (e) {
-    $('progressWrap').hidden = true;
-    showAlert('重新学习失败：' + e.message);
+    if (token === fundGeneration) showAlert('重新学习失败：' + e.message);
+  } finally {
+    if (token === fundGeneration) $('progressWrap').hidden = true;
   }
 }
 

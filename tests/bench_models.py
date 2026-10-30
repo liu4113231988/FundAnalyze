@@ -2,13 +2,13 @@
 """逐模型计时，定位滚动评估的性能瓶颈。"""
 import sys, time, warnings
 warnings.filterwarnings("ignore")
-sys.path.insert(0, ".")
 
 import numpy as np
 import pandas as pd
 
-from src import config as C, data as D
-from src.models import ModelZoo, MODEL_ORDER, fit_window
+import market_research.config as C
+import market_research.data.marketdata as D
+from market_research.modeling.models import ModelZoo, MODEL_ORDER, fit_window
 
 code = sys.argv[1] if len(sys.argv) > 1 else "110022"
 panel = D.load_panel(code, verbose=False)

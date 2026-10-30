@@ -7,8 +7,9 @@ const functionText = source.slice(source.indexOf('async function applyParams()')
 let submitted;
 let applied;
 const context = {
+  fundGeneration: 0,
   S: {sel: 'ridge', params: {}, cat: {models: [{key: 'ridge', name: 'Ridge', params: {alpha_scale: 1}}]},
-      result: {code: '110022', meta: {models: ['ridge', 'pcr'], params: {pcr: {n_components: 2}}, max_rebal: 30, auto_equity: false, window_requested: '2021-01-01', end: '2026-01-01'}}},
+      result: {code: '110022', meta: {models: ['ridge', 'pcr'], params: {pcr: {n_components: 2}}, max_rebal: 30, auto_equity: false, window_requested: '2021-01-01', window_requested_end: null, end: '2026-01-01'}}},
   $: id => id === 'tunerBody' ? {querySelectorAll: () => [{dataset: {pk: 'alpha_scale'}, type: 'number', value: '2'}]} : {},
   setProgress() {}, showAlert(message) { if (message) throw Error(message); },
   api: async (url, options) => { submitted = JSON.parse(options.body); return {cached: true, result: {insights: 'updated', style_drift: 'updated'}}; },
@@ -19,7 +20,7 @@ vm.runInContext(functionText, context);
 (async () => {
   await context.applyParams();
   assert.equal(submitted.start, '2021-01-01');
-  assert.equal(submitted.end, '2026-01-01');
+  assert.equal(submitted.end, null);
   assert.equal(submitted.max_rebal, 30);
   assert.equal(submitted.auto_equity, false);
   assert.deepEqual(submitted.models, ['ridge', 'pcr']);

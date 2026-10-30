@@ -11,13 +11,13 @@ import time
 import warnings
 
 warnings.filterwarnings("ignore")
-sys.path.insert(0, ".")
 
 import numpy as np
 import pandas as pd
 
-from src import config as C, data as D
-from src.models import ModelZoo, fit_window, MODELS, MODEL_ORDER, model_catalog
+import market_research.config as C
+import market_research.data.marketdata as D
+from market_research.modeling.models import ModelZoo, fit_window, MODELS, MODEL_ORDER, model_catalog
 
 pd.set_option("display.width", 200)
 

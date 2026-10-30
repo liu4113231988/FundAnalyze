@@ -3,12 +3,11 @@
 import sys, time, warnings
 from pathlib import Path
 warnings.filterwarnings("ignore")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
-from src import config as C
-from src import data as D
-from src.rbsa import RBSA
+import market_research.config as C
+import market_research.data.marketdata as D
+from market_research.funds.rbsa import RBSA
 
 CODE = sys.argv[1] if len(sys.argv) > 1 else "110022"
 t0 = time.time()

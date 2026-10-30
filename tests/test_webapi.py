@@ -11,19 +11,18 @@ ModelZoo 的进程池用 **spawn** 上下文，spawn 会在子进程中重新 im
 而这个测试恰恰又没有 sys.exit()，所以"全 FAIL"一直没人发现。
 任何调用 analyze() / ModelZoo.run() 的脚本都必须有 main 保护。
 
-注意：脚本里用 analyze() 直连，**不经过 Flask**，因此不覆盖路由层的参数校验。
+注意：脚本里用 analyze() 直连，**不经过 HTTP**，因此不覆盖路由层的参数校验。
 """
 import sys, time, warnings
 warnings.filterwarnings("ignore")
-sys.path.insert(0, ".")
 
 import json
 import pandas as pd
-from src.webapi import analyze, refit_single, get_fund_name
-from src.payloads import correlation_block, nav_block
-from src import config as C
-from src import data as D
-from src.models import MODEL_ORDER
+from market_research.funds.analysis import analyze, refit_single, get_fund_name
+from market_research.funds.payloads import correlation_block, nav_block
+import market_research.config as C
+import market_research.data.marketdata as D
+from market_research.modeling.models import MODEL_ORDER
 
 QUICK = ["enet_slsqp", "corr_topk", "pcr", "rf", "krr"]
 

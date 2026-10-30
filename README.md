@@ -1,4 +1,65 @@
-# fund-index-lens · 主动基金指数拟合与趋势估值研究
+# Market Research · 股票、基金、指数研究
+
+后端已迁移为 **uv + FastAPI + Uvicorn + 独立计算进程 + DuckDB 持久任务队列**。研究算法和历史行情保留，现有前端 `/api/*` 地址保持兼容。
+
+## 启动与环境
+
+验证环境为 Python 3.13.14 / Windows，Python 版本由 `.python-version` 固定，直接与传递依赖由 `uv.lock` 锁定。
+
+```powershell
+uv sync --locked
+uv run --locked market-research --port 8877
+```
+
+打开 `http://127.0.0.1:8877/`；接口文档为 `/docs`，机器可读协议为 `/openapi.json`。`requirements.lock.txt` 是从 uv 导出的运行依赖兼容文件，不再手工维护。研究脚本使用 `uv run python run.py ...` 等原有根目录路径。
+
+Web 首次启动会启动独立单实例 worker；API 关闭或重启后，worker 继续完成队列和执行同步调度。一个任务一个子进程；模型原生库异常与超时不会终止 API。任务状态及结果保留24小时（提交新任务时清理到期终态），重启后仍可查询同一个 job_id。
+
+分别部署时：
+
+```powershell
+$env:FIL_AUTO_SERVICES = '0'
+uv run --locked market-research-worker
+# 在另一个终端启动 API
+uv run --locked market-research --port 8877
+```
+
+停止自动启动的 worker：`uv run market-research-worker --stop`。停止时中断任务会保留并按重试策略恢复。多 API 进程共享同一个数据目录和队列；多台机器共享目录不在支持范围内。
+
+| 环境变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| FIL_HOME | 源码根目录；安装包运行时为当前目录 | 运行产物根目录 |
+| FIL_DATA_DIR | FIL_HOME/output/data | DuckDB、任务和日志目录 |
+| FIL_HOST / FIL_PORT | 127.0.0.1 / 8760 | HTTP 监听地址 |
+| FIL_AUTO_SERVICES | 1 | 自动启动独立 worker |
+| FIL_MAX_JOBS | 2 | 同时运行的分析进程数 |
+| FIL_QUEUE_LIMIT | 100 | 排队及运行任务总上限，超过返回429 |
+| FIL_JOB_TIMEOUT | 900 | 每次计算的秒数上限 |
+| FIL_JOB_ATTEMPTS | 3 | 进程中断的最大尝试次数；正常业务异常不盲目重试 |
+| FIL_SYNC_ENABLED / FIL_SYNC_TIME | 1 / 18:30 | 同步调度开关及北京时间 |
+| FIL_CORS_ORIGINS | 空 | 允许的跨域来源，逗号分隔；同源页面无需配置 |
+
+任务状态为 queued → running → done/error，仍使用 `POST /api/analyze` / `/api/market/analyze` → `GET /api/job/{id}` → `GET /api/result/{id}`。新增 `POST /api/job/{id}/cancel`；所有参数校验统一返回兼容的400错误对象（包含error和field），队列满为429，未完成结果为202。超时终止计算进程；心跳租约及尝试令牌隔离过期进程，计算进程意外退出后恢复排队。正常完成的基金分析继续写原有结果缓存。
+
+API 日志使用 Uvicorn；监督进程、每次分析与同步进程的日志分别为 `output/data/worker.log`、`job-{id}.log`、`sync-process.log` / `sync.log`。添加资产与手动重试仍在数据中心操作。
+
+Windows 定时任务安装／迁移：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_sync_task.ps1 -Time 18:30`，默认使用 `.venv/Scripts/pythonw.exe`，不依赖当前终端是否激活虚拟环境。
+
+验证：
+
+```powershell
+uv run python -m unittest discover -s tests -p 'test_*.py'
+node tests/market_browser.cjs
+node tests/technical_browser.cjs
+node tests/datacenter_browser.cjs
+node tests/controls_browser.cjs
+```
+
+部分研究脚本有独立main入口，不会由unittest自动执行；完整基金计算验证：`uv run python tests/test_webapi.py 110022 3`。浏览器脚本要求本地8877服务与9229隔离Edge。Windows的ASGI测试需要允许创建本机socketpair。
+
+---
+
+## 研究背景与历史结果
 
 把一只主动基金用 **滚动 RBSA（基于收益的风格分析）** 还原成「指数 + 风格因子」的组合，
 再基于合成基准的趋势与估值状态生成仓位建议，并对整套逻辑做**严格样本外回测与对照实验**。
@@ -79,15 +140,31 @@
 
 ---
 
-## 🖥 Web 界面（交互式分析台）
+## 🖥 Web 界面（三类资产研究台）
+
+顶部有 **股票 / 基金 / 指数** 三个入口，默认打开股票。股票与指数独立于基金拟合流程：
+
+- **股票**：沪深京 A 股日线，支持 K 线/收盘线、MA20/60/120、成交量、区间收益、最大回撤、年化波动，以及相对沪深300/中证500/创业板指的收益差、Beta、相关性。
+- **基金**：保留原有滚动 RBSA、多模型比较、风格漂移与研究回测。
+- **指数**：沪市 `sh000xxx` 与深市 `sz399xxx` 价格指数走势、风险和基准比较。
+
+股票可输入 `600519`、`sz000001`、`bj920xxx`；指数建议使用 `sh000001`、`sh000300` 等完整代码，避免与股票混淆。自选日期区间至少 30 个自然日，数据至少 21 根日线。股票支持前复权、不复权、后复权；前复权会随分红拆分重写历史，页面显示的是历史价格分析，不是时点可得的交易回测。
+
+日线通过 AKShare 获取：股票东方财富主源、腾讯备用源；指数使用新浪。行情直接写入 DuckDB，复权口径和资产类型分别缓存，刷新失败保留旧数据；基准失败只降级比较区块。最新日期以数据实际末日为准，成交量股票统一为股，指数保留数据源原单位。
+
+`POST /api/market/analyze` 接收 `kind`（stock/index）、`code`、`start`、`end`、`adjust`、`benchmark` 和 `refresh`，复用现有任务轮询接口。
+
+验证：`python tests/test_market.py`；浏览器脚本 `node tests/market_browser.cjs` 需要本地服务（默认 8877）和独立 Edge CDP（9229）。截图与界面状态证据保存在 `output/ui-evidence/`。
+
+### 基金分析
 
 输入任意 6 位基金代码，网页会给出：净值走势、与候选指数池的相关性分析
 （定义 47 个，按覆盖率过滤后通常剩 40~44 个）、
 **十一种机器学习方法的拟合结果横向对比**，并标出当前评估区间内样本外表现最好的模型；该排名不代表独立验证后的未来表现。
 
 ```bash
-pip install -r requirements.txt
-python webapp/serve.py --restart        # 启动后浏览器打开 http://127.0.0.1:8760
+uv sync --locked
+python src/market_research/cli/serve.py --restart        # 启动后浏览器打开 http://127.0.0.1:8760
 ```
 
 浏览器里可以：
@@ -127,7 +204,7 @@ python webapp/serve.py --restart        # 启动后浏览器打开 http://127.0.
 ```bash
 # 1. 环境
 python -m venv .venv && . .venv/Scripts/activate   # Windows Git Bash
-pip install -r requirements.txt
+uv sync --locked
 
 # 2. 数据预热（可选）：把基金净值与指数池抓到本地，之后可离线分析
 python warm_cache.py                # 预热默认样本；也可指定代码 / --refresh
@@ -320,53 +397,33 @@ fund-index-lens/
 
 ## 项目结构
 
-```
-fund-index-lens/
-├── webapp/                     🖥 Web 交互界面
-│   ├── app.py                     Flask 路由、HTTP 响应与结果缓存
-│   ├── serve.py                   启动/重启脚本（自动清理端口占用）
-│   └── static/
-│       ├── index.html             单页结构
-│       ├── app.js                 渲染逻辑（ECharts）
-│       ├── style.css              深色终端风格
-│       └── vendor/echarts.min.js  本地化，无外网依赖
-│
-├── src/
-│   ├── models.py               ⭐ 多模型引擎 + 滚动样本外评估
-│   ├── webapi.py               ⭐ 分析与回测用例编排（无 HTTP 依赖）
-│   ├── payloads.py                图表、指标和结论的结果组装
-│   ├── jobs.py                    后台任务状态、去重、限流及线程生命周期
-│   ├── webparams.py               Web 模型参数校验
-│   ├── window.py                  CLI / Web 共用日期窗口规则
-│   ├── storage.py                 DuckDB 事务、进程间锁和数据读写
-│   ├── fileio.py                  结果缓存及导出文件原子写入
-│   ├── runinfo.py                 代码、依赖与数据库运行记录
-│   ├── data.py                    数据抓取与对齐
-│   ├── rbsa.py                   RBSA 兼容入口，复用 models.py 引擎
-│   ├── signal.py                 三通道信号 + 拟合健康门控
-│   ├── backtest.py               回测 + 逐方案恒定仓位对照
-│   ├── experiments.py            E1~E4 诊断实验
-│   ├── robustness.py             ⭐ 有效样本量 / 共同因子 / 块 bootstrap
-│   ├── charts.py / report.py     报告生成
-│   └── config.py                 候选池与全部参数
-│
+```text
+project/
+├── pyproject.toml / uv.lock / .python-version
+├── src/market_research/
+│   ├── api/             FastAPI 工厂、路由与协议
+│   ├── services/        API 与 worker 共用的分析编排
+│   ├── market/          股票、指数和技术指标
+│   ├── funds/           基金分析、RBSA、持仓与结果组装
+│   ├── modeling/        模型目录、单窗口拟合、滚动引擎、回测
+│   ├── data/            数据源、缓存、面板、DuckDB 与 SQL 迁移
+│   ├── tasks/           队列、worker、同步与进程管理
+│   ├── research/        实验、稳健性检验、报告与研究命令
+│   ├── validation/      日期与模型参数规则
+│   ├── cli/             研究和维护命令入口
+│   ├── config.py / settings.py
+│   └── serialization.py
+├── webapp/static/       前端资源；随安装包发布
+├── src/*.py             旧模块导入／缓存兼容转发
+├── webapp/*.py          旧 Web 入口兼容转发
+├── run*.py 等           14 个根目录兼容入口
 ├── tests/
-│   ├── bench_models.py            各模型计时与排名
-│   ├── smoke_models.py            多模型冒烟
-│   ├── test_webapi.py             后端端到端（payload 完整性）
-│   ├── test_jobs.py               调度、失败回收、终态保护和日期一致性
-│   ├── test_storage_routes.py     DuckDB 迁移、事务、并发与接口行为
-│   ├── test_refit.js              重算配置及完整结果刷新
-│   ├── test_p0_fixes.py           ⭐ 离线回归：对照口径/边界/健康门控（有退出码）
-│   └── dom_check.js               前端 DOM 渲染（jsdom，14 项断言）
-│
-├── run.py / run_experiments.py / run_extended.py
-├── run_robustness.py            ⭐ 稳健性检验（n_eff / 共同因子 / bootstrap）
-├── run_walkforward.py           ⭐ 按管理人分折验证参数是否过拟合
-├── warm_cache.py                数据预热（批量抓取到本地，支持离线分析）
-├── build_report.py              生成 HTML 报告
-└── docs/                       研究方案与架构设计
+└── output/              行情、结果和运行日志
 ```
+
+主实现统一使用 `market_research`。旧 `src.*` / `webapp.*` 模块只有转发代码，供已有导入和旧缓存类路径使用，新模块不依赖这些旧命名。所有根目录脚本仅导入并调用新模块的 `main()`，不再修改 `sys.path`。
+
+统一研究入口：`uv run market-research-cli --help`。例如 `uv run market-research-cli analyze 110022`、`uv run market-research-cli report --help`、`uv run market-research-cli cache-migrate`。旧命令 `uv run python run.py 110022` 仍可使用。完整对应表见 [模块与入口](docs/模块与入口.md)。
 
 ---
 
@@ -437,3 +494,54 @@ Web 界面刻意不提供买卖信号，只做风格穿透与模型对比——
 
 离线验证：`python tests/test_storage_routes.py`、`python tests/test_p0_fixes.py`、
 `python tests/test_regressions.py`。行情迁移不涉及研究报告、持仓明细和结果导出的 CSV。
+
+
+### 已添加资产的每日同步
+
+默认北京时间每天 **18:30** 同步，仅处理已经分析/缓存过的股票、基金及实际使用的候选指数。示例目录不等于已添加名单，不抓全市场。服务空闲时约每 30 秒检查新添加资产；已有批次运行时等待该批次完成后排队，首次补齐数据源可提供的历史（请求起点 1990-01-01）。历史存储在同一个 DuckDB 中。
+
+- 不复权股票、指数：首次全历史，之后回补最近 10 个自然日并合并新增行情。
+- 前/后复权股票：每天重新抓取该证券完整历史后替换，避免分红、配股、拆分及数据源修订使旧历史失效。当前没有可靠且完整的公司行动源，因此不依赖“事件没查到就不刷新”的假设。
+- 基金：每天重建完整净值/总回报历史，处理分红与月度校准锚点修订。现有事后校准口径仍不构成严格时点可得回测。
+- 数据为空、历史倒退、复权历史被截断或净值口径降级时保留旧数据；记录错误，服务运行期间每 30 分钟重试。定时任务单次执行失败则等待服务重试或下次任务运行。
+- 很早期前复权价可能为零或负数：历史库保留源值，所选分析区间存在非正价时要求改用后复权/缩短区间。
+
+启动 Web 服务会通过独立 worker 启动同步调度。也可独立运行 `uv run market-research-sync`；单次检查到期任务用 `uv run market-research-sync --once`。跨进程文件锁避免多个调度器重复执行。任务列表、最近成功时间、同步方式及错误可查看 `GET /api/sync`；独立进程日志在 `output/data/sync.log`。
+
+Windows 安装每日任务：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_sync_task.ps1 -Time 18:30
+```
+
+任务名 `MarketResearch-DailySync`，使用无窗口 Python 和北京时间触发边界，支持错过时间后补跑；电脑需开机且当前用户已登录。删除任务可用 `Unregister-ScheduledTask -TaskName MarketResearch-DailySync -Confirm:$false`，不会删除行情。更改时间时重新运行安装脚本，并将 Web 环境变量 `FIL_SYNC_TIME` 设为同一时间；`FIL_SYNC_ENABLED=0` 关闭 worker 管理的同步调度，Windows 任务需单独停用。周末同样检查已添加资产，停牌/非交易日没有新日线属于正常情况。
+
+
+### 数据中心
+
+页面右上角「数据中心」提供已添加资产的去重统计、按代码/名称搜索、按同步状态筛选，以及证券添加和单口径重试。明细保留前/后复权、累计净值/总回报等独立口径；状态约每 20 秒刷新，运行中的任务不能重复提交。添加/重试会写入持久队列，待当前同步批次结束后处理；重新同步不删除上一份成功数据。
+
+接口：`POST /api/sync/assets` 接受 `{kind, code, basis}`；`POST /api/sync/retry` 接受 `{asset_key}`；`GET /api/sync` 返回状态、历史记录数及最近成功时间。重试状态迁移由 `src/migrations/002_sync_state.sql` 加性迁移提供。
+
+
+### 股票趋势与交易辅助
+
+股票入口新增趋势规则、技术指标和未来 5 / 20 个交易日的方向估计。当前仅作为研究与人工交易辅助，不发送订单。
+
+- 指标：MA20/60、MACD(12,26,9；柱值为两倍 DIF-DEA)、RSI14、布林带(20,2，总体标准差)、ATR14、当前量/此前20日均量、前20日高低点。RSI/ATR 使用首个14期算术均值初始化的 Wilder 平滑；横盘 RSI 约定为50。
+- 趋势规则：五项方向等权计分，正/负/持平分别记+20/-20/0；至少65根日线后合成。买入关注要求分数≥60、RSI为45～70且价格不高于布林上轨；减仓警戒为分数≤-20，或收盘低于MA20且MACD柱为负。条件首次满足才记录，连续满足不重复。规则分不是上涨概率。
+- 参考价位：此前20日低/高点，以及收盘减2ATR观察线；均为当前所选复权坐标，不代表保证成交或基于持仓成本的止损。规则与模型方向分歧时单独提示。
+- 方向模型：固定参数 StandardScaler + LogisticRegression(C=0.1)，每21个交易日更新，训练252～756个已成熟样本；目标为未来5/20个交易日收盘相对当前收盘是否上涨。特征包括价格动量、均线偏离/斜率、MACD、RSI、ATR和布林宽度。缩放器只拟合训练数据；训练标签终点不得晚于预测当天。不做全样本挑参，也不输出精确股价目标。
+- 验证：只展示所选区间内已成熟预测，按预测周期间隔抽样以减少标签重叠；报告准确率、Brier与当时训练集上涨频率基准。至少20笔才比较Brier优劣；这不是统计显著性检验，概率未单独校准，历史优势不保证未来收益。
+- 默认从同步历史中取至多1500根日线做预热和滚动计算，仅展示所选区间；历史尚未补齐时使用现有数据。样本不足、单一标签类别时明确不输出模型概率。手动刷新与历史库OHLC不一致时，禁止混用旧复权训练历史。
+
+验证口径不含费用、滑点、停牌、涨跌停和真实成交；复权历史会被后续公司行动修订，因此尚非严格时点可得的数据回测。不复权会受分红除息机械缺口影响；后复权价不能直接下单。新模型仅估计方向，应结合验证表现及其他信息使用。
+
+运行离线检查：`python -m unittest discover -s tests -p test_technical.py`；浏览器检查 `node tests/technical_browser.cjs`（需本地8877服务、9229隔离Edge；短样本场景使用真实行情生成的本地测试响应）。
+
+指标参考：[Fidelity技术指标指南](https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/overview)；验证参考：[scikit-learn时间序列切分](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html)。
+
+
+### 日期与下拉控件
+
+`webapp/static/controls.js` 统一增强全部单选下拉框与日期字段，包含基金回测和数据中心。保留原始元素ID、值、约束和input/change事件；支持动态选项、禁用状态、直接输入日期（YYYY-MM-DD或8位数字）、年月跳转和键盘选择。弹层使用Popover顶层，避免被滚动区域或原生dialog裁剪；不支持Popover的环境保留原生控件。日期与菜单样式复用全站设计变量，无新增依赖。验证：`node tests/controls_browser.cjs`（需本地8877服务及9229隔离Edge）。

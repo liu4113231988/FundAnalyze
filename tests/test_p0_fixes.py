@@ -16,7 +16,6 @@ import warnings
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:                                             # noqa: BLE001
@@ -25,9 +24,9 @@ except Exception:                                             # noqa: BLE001
 import numpy as np
 import pandas as pd
 
-from src import config as C
-from src.backtest import run_backtest
-from src.signal import SignalEngine, build_decision, health_stats
+import market_research.config as C
+from market_research.modeling.backtest import run_backtest
+from market_research.modeling.signals import SignalEngine, build_decision, health_stats
 
 C_RF = C.BACKTEST["cash_rate"]
 
@@ -263,7 +262,7 @@ def t3():
 # ============================================================== T4 E4 对照
 def t4():
     print("\nT4 · E4 周期矩阵：对照按被评估方案自身的平均仓位构造")
-    from src.experiments import lowfreq_grid
+    from market_research.research.experiments import lowfreq_grid
 
     idx, r, nav = _synth(n=900)
     syn_nav = np.exp(pd.Series(r * 0.9, index=idx).cumsum())
@@ -302,7 +301,7 @@ def _synth_panel(n=600, k=5, seed=3):
 
 def t5():
     print("\nT5 · 模型层：权重必须从标准化空间正确还原（除以 sd）")
-    from src.models import fit_window
+    from market_research.modeling.models import fit_window
 
     X, y, cols = _synth_panel()
     X2 = X.copy()
@@ -335,7 +334,7 @@ def t5():
         chk(False, f"pcr 一致性检查抛异常 {type(e).__name__}: {e}")
 
     # SLSQP 不收敛时必须兜底，不能返回 NaN
-    from src.models import _constrained_fit
+    from market_research.modeling.models import _constrained_fit
     bad = np.full((5, 3), np.nan)          # 全 NaN 的输入会让 SLSQP 直接失败
     w = _constrained_fit(bad, np.full(5, np.nan), 0.9)
     chk(np.all(np.isfinite(w)) and abs(w.sum() - 0.9) < 1e-6,
@@ -345,7 +344,7 @@ def t5():
 # ============================================================== T6 数据缓存
 def t6():
     print("\nT6 · 数据缓存：口径可失效、并发写不损坏")
-    from src import data as D
+    import market_research.data.marketdata as D
 
     # 元数据不一致 → 判为过期
     D._cache_meta_write("_t6probe", {"v": 1, "end": None})
@@ -359,7 +358,7 @@ def t6():
     # ---- 分层缓存的行为语义（用计数 builder，不碰网络）
     # 存储重构后 load_panel 不再落盘整块面板，改为「指数池全局一份 + 净值每只一份」，
     # 面板即时重建。所以这里要测的是 _cached 的命中/失效语义，而不是某个键的拼法。
-    from src import config as C
+    import market_research.config as C
     calls = {"n": 0}
 
     def _builder():
@@ -394,7 +393,7 @@ def t6():
         if f.exists():
             f.unlink()
 
-    from src import storage
+    import market_research.data.storage as storage
     with storage.connection() as db:
         db.execute("DELETE FROM prices WHERE dataset=?", [name])
         db.execute("DELETE FROM datasets WHERE name=?", [name])
@@ -414,8 +413,8 @@ def t6():
 
     # 并发写同一缓存文件（两个相同请求不同 job_id 会撞同一路径）
     import pickle, threading
-    from src import config as C
-    from src.fileio import _atomic_pickle_dump
+    import market_research.config as C
+    from market_research.data.files import _atomic_pickle_dump
     fp = C.DATA_DIR / "_t6probe.pkl"
     def w(i):
         for _ in range(30):
@@ -462,8 +461,8 @@ def _low_equity_panel(n=1400, gamma=0.30, seed=17, k=12):
 
 def t7():
     print("\nT7 · 仓位自适应：固定 Σw=0.9 对低仓位基金是灾难性的")
-    from src import config as C
-    from src.models import ModelZoo
+    import market_research.config as C
+    from market_research.modeling.models import ModelZoo
 
     for gamma in (0.30, 0.90):
         px = _low_equity_panel(gamma=gamma)
@@ -510,7 +509,7 @@ def t7():
 # ============================================================== T8 成本敏感性
 def t8():
     print("\nT8 · 成本敏感性：成本影响必须与换手成正比")
-    from src.experiments import cost_sensitivity, cost_durability, COST_TIERS
+    from market_research.research.experiments import cost_sensitivity, cost_durability, COST_TIERS
 
     rng = np.random.default_rng(5)
     n = 1500
@@ -561,8 +560,7 @@ def t8():
 # ============================================================== T9 趋势状态
 def t9():
     print("\nT9 · 趋势状态判定（高低点结构）：标签正确性与退化边界")
-    from src.trend_state import (classify_series, classify_at, summarize,
-                                 run_lengths, trend_payload, TREND_LEVELS)
+    from market_research.modeling.trends import classify_series, classify_at, summarize, run_lengths, trend_payload, TREND_LEVELS
 
     # --- 9a 单调上升 / 下降：结构最清晰的情形
     up = list(range(1, 21))

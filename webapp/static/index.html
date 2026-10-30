@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Fund Lens · 基金风格穿透与机器学习拟合</title>
+<title>Market Research · 股票 · 基金 · 指数</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -21,14 +21,19 @@
       </svg>
     </span>
     <div class="brand-txt">
-      <h1><b>Fund</b><i>Lens</i></h1>
+      <h1><b>Market</b><i>Research</i></h1>
       <p class="brand-tags">
-        <span>主动基金</span><span>指数穿透</span><span>多模型拟合</span>
+        <span>市场研究工作台</span>
       </p>
     </div>
   </div>
+  <nav class="asset-nav" aria-label="分析入口">
+    <button type="button" data-asset="stock" aria-pressed="true"><span>01</span> 股票</button>
+    <button type="button" data-asset="fund" aria-pressed="false"><span>02</span> 基金</button>
+    <button type="button" data-asset="index" aria-pressed="false"><span>03</span> 指数</button>
+  </nav>
   <form class="search" id="searchForm" autocomplete="off">
-    <input id="codeInput" placeholder="输入 6 位基金代码，如 110022" maxlength="6" />
+    <label class="sr-only" for="codeInput">证券代码</label><input id="codeInput" placeholder="股票代码，如 600519" maxlength="8" />
     <button type="submit" id="runBtn" class="btn primary">
       <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
         aria-hidden="true"><path d="M2.6 8h9.2M8.4 4.2 12.2 8l-3.8 3.8"
@@ -42,6 +47,73 @@
   </form>
 </header>
 
+<div class="workspace-bar">
+  <p><span class="status-dot" aria-hidden="true"></span> 个人市场研究 <span class="workspace-divider">/</span> <time id="workspaceDate"></time></p>
+  <button class="data-center-toggle" id="openDataCenter" type="button" aria-haspopup="dialog"><span id="syncIndicator">读取同步状态…</span><span aria-hidden="true"> ↗</span></button>
+</div>
+
+<dialog id="dataCenter" aria-labelledby="dataCenterTitle">
+  <div class="dc-heading"><div><p class="eyebrow">YOUR MARKET UNIVERSE</p><h2 id="dataCenterTitle">数据中心</h2><p class="meta" id="syncSchedule">读取同步计划…</p></div><button type="button" id="closeDataCenter" class="icon-button" aria-label="关闭数据中心">✕</button></div>
+  <div class="sync-overview" id="syncOverview"></div>
+  <form id="addAssetForm" class="add-asset-form">
+    <label>资产<select id="addAssetKind"><option value="stock">股票</option><option value="fund">基金</option><option value="index">指数</option></select></label>
+    <label class="asset-code-field">证券代码<input id="addAssetCode" placeholder="如 600519" required maxlength="8" autocomplete="off"></label>
+    <label id="addBasisField">数据口径<select id="addAssetBasis"><option value="qfq">前复权</option><option value="hfq">后复权</option><option value="">不复权</option></select></label>
+    <button type="submit" id="addAssetButton" class="btn primary">＋ 添加资产</button>
+  </form>
+  <p class="dc-help">添加后自动排队补齐历史；复权股票与基金每天校验完整历史，其他行情增量更新。</p>
+  <div class="dc-toolbar"><label class="sr-only" for="assetSearch">搜索证券名称或代码</label><input id="assetSearch" type="search" placeholder="搜索名称或代码"><label class="sr-only" for="assetState">同步状态</label><select id="assetState"><option value="">全部状态</option><option value="error">同步失败</option><option value="pending">等待同步</option><option value="running">同步中</option><option value="success">已同步</option></select><button type="button" id="refreshSync" class="btn ghost">刷新状态</button></div>
+  <p id="syncFeedback" class="sync-feedback" role="status" hidden></p>
+  <div class="dc-table-scroll"><table class="dc-table"><thead><tr><th>资产 / 口径</th><th>同步状态</th><th>最近成功 · 北京时间</th><th>历史记录</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="syncAssetRows"></tbody></table></div>
+  <p id="syncEmpty" class="dc-empty" hidden>尚未添加资产，从上方添加一只证券开始。</p>
+  <p class="dc-footer" id="syncUpdated">状态将自动刷新</p>
+</dialog>
+
+<main id="marketView" class="market-view">
+  <section class="market-intro">
+    <div><p class="eyebrow" id="marketEyebrow">EQUITY RESEARCH</p><h2 id="marketTitle">股票分析</h2><p id="marketSubtitle">从价格、成交与风险，观察一只股票。</p></div>
+    <span class="market-frequency">日线研究 <span aria-hidden="true">/</span> A 股市场</span>
+  </section>
+  <form id="marketFilters" class="market-toolbar">
+    <label>开始日期<input type="date" id="marketStart" required></label>
+    <label>结束日期<input type="date" id="marketEnd" required></label>
+    <label id="adjustField">价格口径<select id="marketAdjust"><option value="qfq">前复权</option><option value="">不复权</option><option value="hfq">后复权</option></select></label>
+    <label>比较基准<select id="marketBenchmark"><option value="sh000300">沪深300</option><option value="sh000905">中证500</option><option value="sz399006">创业板指</option></select></label>
+    <button class="btn ghost" type="submit" id="marketRecalculate">应用区间</button>
+  </form>
+  <div id="marketStatus" role="status" class="market-status" hidden></div>
+  <section id="marketEmpty" class="market-empty">
+    <div class="empty-editorial"><span class="empty-number" aria-hidden="true">01—03</span><p>PRICE · RISK · PERSPECTIVE</p></div>
+    <p class="eyebrow">START YOUR RESEARCH</p><h3 id="marketEmptyTitle">选择一只股票，展开分析</h3>
+    <p id="marketEmptyText">输入代码，或从下方示例开始。观察历史表现，比较市场基准。</p>
+    <div id="marketExamples" class="market-examples"></div>
+    <div class="universe-summary" id="universeSummary" aria-label="系统已添加资产">正在读取你的研究范围…</div>
+  </section>
+  <div id="marketResult" hidden>
+    <section class="market-result-head"><div><h2 id="marketName"></h2><p class="meta" id="marketMeta"></p></div><button class="btn ghost" type="button" id="marketRefresh">↻ 刷新行情</button></section>
+    <div class="kpis" id="marketKpis"></div>
+    <section id="stockTechnical" class="stock-technical" aria-labelledby="technicalTitle" hidden>
+      <div class="technical-heading"><div><p class="eyebrow">TREND & DECISION SUPPORT</p><h3 id="technicalTitle">趋势与交易辅助</h3></div><span class="meta" id="technicalAsOf"></span></div>
+      <div class="technical-decision"><div class="decision-main"><span id="technicalTrend" class="trend-badge"></span><h4 id="technicalAction"></h4><p id="technicalScore"></p></div><ul id="technicalReasons"></ul></div>
+      <p id="technicalConflict" class="technical-conflict" role="status" hidden></p>
+      <div id="technicalMetrics" class="technical-metrics"></div>
+      <div id="technicalLevels" class="technical-levels"></div>
+      <div class="forecast-heading"><h4>未来方向 · 5 / 20 个交易日</h4><span>滚动逻辑回归 · 仅使用已成熟标签</span></div>
+      <div id="stockForecasts" class="stock-forecasts"></div>
+      <details class="technical-details"><summary>规则、模型验证与使用边界</summary><p id="technicalRules"></p><p>方向模型每 21 个交易日更新，最多使用最近 756 个已成熟样本；标准化仅拟合训练数据。历史评估每隔预测周期抽取一笔，减少标签重叠。基准为当时训练集的上涨频率；Brier 越小越好。样本少于 20 笔时不判断有效性；预测概率未单独校准。</p><ul id="technicalNotices"></ul><p><a href="https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/overview" target="_blank" rel="noopener">技术指标参考 ↗</a></p></details>
+    </section>
+    <section class="panel market-price-panel"><div class="sec-head"><h3>价格与均线</h3><div class="seg" id="marketChartType" aria-label="价格图类型"><button type="button" data-chart="candlestick" aria-pressed="true">K 线</button><button type="button" data-chart="line" aria-pressed="false">收盘线</button></div></div><div id="marketPrice" class="chart tall" role="img" aria-label="历史价格与20、60、120日均线"></div><p class="note" id="marketPriceNote"></p></section>
+    <div id="stockIndicatorCharts" hidden>
+      <div class="grid2 market-charts"><section class="panel"><h3>MACD · 12 / 26 / 9</h3><div id="stockMacd" class="chart short" role="img" aria-label="MACD DIF DEA 与两倍差值柱"></div></section><section class="panel"><h3>RSI14 · 30 / 70 观察线</h3><div id="stockRsi" class="chart short" role="img" aria-label="RSI14 强弱指标"></div></section></div>
+      <section class="panel signal-history"><h3>最近条件触发记录</h3><p class="note">收盘后首次满足时记录；连续满足不会每天重复。记录不代表已成交。</p><div id="stockSignalHistory"></div></section>
+    </div>
+    <div class="grid2 market-charts"><section class="panel"><h3>成交量 <span class="meta" id="marketVolumeUnit"></span></h3><div id="marketVolume" class="chart short" role="img" aria-label="历史成交量"></div><p class="note" id="marketVolumeNote"></p></section><section class="panel"><h3>与基准比较 · 起点归一为 1</h3><div id="marketCompare" class="chart short" role="img" aria-label="同区间基准表现比较"></div><p class="note" id="marketCompareNote"></p></section></div>
+    <div class="market-relative" id="marketRelative"></div>
+    <div class="grid2 market-charts"><section class="panel"><h3>历史回撤</h3><div id="marketDrawdown" class="chart short" role="img" aria-label="历史最大值至当前的回撤"></div></section><section class="panel"><h3>20 日滚动年化波动</h3><div id="marketVolatility" class="chart short" role="img" aria-label="20日滚动年化波动率"></div></section></div>
+    <section class="market-notes" aria-label="数据口径"><h3>数据与口径</h3><ul id="marketNotes"></ul></section>
+  </div>
+</main>
+
 <!-- ================= 进度条 ================= -->
 <div class="progress-wrap" id="progressWrap" hidden>
   <div class="progress-box">
@@ -52,7 +124,7 @@
 </div>
 
 <!-- ================= 错误条 ================= -->
-<div class="alert" id="alert" hidden></div>
+<div class="alert" id="alert" role="alert" hidden></div>
 
 <!-- ================= 主体 ================= -->
 <main id="main" hidden>
@@ -343,7 +415,7 @@
 </main>
 
 <!-- ================= 空状态 ================= -->
-<div class="empty" id="empty">
+<div class="empty" id="empty" hidden>
   <div class="empty-in">
     <div class="empty-icon">
       <svg viewBox="0 0 24 24" width="64" height="64" fill="none"
@@ -368,6 +440,9 @@
 </div>
 
 <script src="/vendor/echarts.min.js"></script>
+<script src="/static/market.js"></script>
+<script src="/static/data-center.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/controls.js"></script>
 </body>
 </html>

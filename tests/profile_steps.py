@@ -3,13 +3,13 @@
 import sys, time, warnings
 from pathlib import Path
 warnings.filterwarnings("ignore")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd, numpy as np
-from src import config as C, data as D
-from src.rbsa import RBSA
-from src.signal import SignalEngine
-from src.backtest import run_backtest, _fwd_ret
+import market_research.config as C
+import market_research.data.marketdata as D
+from market_research.funds.rbsa import RBSA
+from market_research.modeling.signals import SignalEngine
+from market_research.modeling.backtest import run_backtest, _fwd_ret
 
 t = {}
 def tick(k, t0):

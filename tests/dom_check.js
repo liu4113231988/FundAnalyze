@@ -66,19 +66,20 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   };
 
   // 手动注入脚本（jsdom 的 resources:'usable' 对本地 http 有时不可靠）
-  for (const src of ['/static/app.js']) {
+  for (const src of ['/static/market.js', '/static/app.js']) {
     const code = await (await fetch(BASE + src)).text();
     try {
       // ★ app.js 首行是 'use strict'，严格模式下**间接 eval 的 const 不会
       // 泄漏到全局作用域**，所以测试里 `window.eval('METRICS')` 会 ReferenceError。
       // 真浏览器里 <script> 是全局脚本、不存在这个问题。
       // 这里追加一行把词典显式导出，供测试做静态一致性检查。
-      window.eval(code + '\n;window.__METRICS = METRICS;window.__S = S;');
+      window.eval(code + (src.endsWith('/app.js') ? '\n;window.__METRICS = METRICS;window.__S = S;' : ''));
     } catch (e) {
       errors.push('[eval ' + src + '] ' + (e.stack || e).slice(0, 400));
     }
   }
   await sleep(1500);
+  doc.querySelector('[data-asset="fund"]').click();
 
   const $ = id => doc.getElementById(id);
   const txt = id => ($(id) ? $(id).textContent.trim() : '<missing>');
@@ -168,7 +169,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   if (cv && cv.__opt) {
     const s = cv.__opt.series || [];
     console.log('    chartCurve series:', s.map(x => `${x.name}(${(x.data || []).length}点)`).join(', '));
-    chk(s.length === 2 && s[0].data.length > 100, '拟合曲线有 2 条序列且数据充足');
+    chk(s.some(x => x.name === '基金净值' && x.data.length > 100) && s.some(x => x.name === '合成基准' && x.data.length > 100), '拟合曲线含基金与合成基准，允许附带 alpha 诊断');
   }
 
   console.log('\n[9] 相关性区块');
@@ -194,10 +195,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   } else chk(false, '排名表无行');
 
   console.log('\n[12] 设为最佳模型');
-  const bestBefore = ($('rankTable').textContent.match(/最佳/) || []).length;
+  const bestBefore = ($('rankTable').textContent.match(/区间最优/) || []).length;
   $('btnSaveSel').dispatchEvent(new window.Event('click', { bubbles: true }));
   await sleep(400);
-  const bestAfter = ($('rankTable').textContent.match(/最佳/) || []).length;
+  const bestAfter = ($('rankTable').textContent.match(/区间最优/) || []).length;
   chk(bestAfter >= 1, `最佳模型标记存在（之前 ${bestBefore} 处）`);
   chk(!$('alert').hidden, '显示切换提示');
 
@@ -213,7 +214,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
     const before = [...$('rankTable').querySelectorAll('tbody tr')]
       .find(tr => /随机森林/.test(tr.textContent));
-    const r2Before = before ? before.textContent.match(/0\.\d{4}/g) : null;
+    const r2Before = JSON.stringify([window.__S.result.models.rf.metrics.oos_r2, window.__S.result.models.rf.metrics.fit_r2_mean]);
 
     // 改 max_depth=2（更浅 → 更欠拟合），验证重学习确实改变结果
     const depthInput = $('tunerBody').querySelector('[data-pk="max_depth"]');
@@ -229,17 +230,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       chk(ok, '重新学习完成');
       const after = [...$('rankTable').querySelectorAll('tbody tr')]
         .find(tr => /随机森林/.test(tr.textContent));
-      const r2After = after ? after.textContent.match(/0\.\d{4}/g) : null;
-      console.log('    RF 重新学习前:', r2Before && r2Before[1],
-                  '→ 后:', r2After && r2After[1]);
+      const r2After = JSON.stringify([window.__S.result.models.rf.metrics.oos_r2, window.__S.result.models.rf.metrics.fit_r2_mean]);
+      console.log('    RF 重新学习前:', r2Before,
+                  '→ 后:', r2After);
       chk(JSON.stringify(r2Before) !== JSON.stringify(r2After),
           '超参改变后 R² 发生变化');
-      chk($('alert').textContent.includes('重新学习'), '提示已更新: ' +
-          $('alert').textContent.slice(0, 90));
+      chk(window.__S.result.meta.params.rf.max_depth === 2, '完整分析结果记录了新的 RF 参数');
     }
   } else chk(false, '未找到随机森林模型卡');
 
   console.log('\n[14] 恢复默认超参');
+  [...$('modelStrip').children].find(c => /随机森林/.test(c.textContent))?.click();
   $('btnResetParams').dispatchEvent(new window.Event('click', { bubbles: true }));
   await sleep(300);
   const dv = $('tunerBody').querySelector('[data-pk="max_depth"]');

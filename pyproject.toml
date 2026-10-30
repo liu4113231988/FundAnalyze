@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=81,<82"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "market-research"
+version = "0.3.0"
+description = "Local stock, fund and index research with durable analysis jobs"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "akshare==1.19.1", "pandas==3.0.6", "numpy==2.4.4",
+  "scipy==1.18.1", "scikit-learn==1.9.1", "matplotlib==3.11.2",
+  "requests==2.33.1", "duckdb==1.5.6",
+  "fastapi==0.135.3", "uvicorn==0.44.0", "pydantic==2.12.5",
+]
+
+[dependency-groups]
+dev = ["httpx==0.28.1"]
+
+[project.scripts]
+market-research = "market_research.api.app:main"
+market-research-worker = "market_research.tasks.worker:main"
+market-research-sync = "market_research.tasks.sync:main"
+
+market-research-cli = "market_research.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["market_research*", "src", "webapp", "webapp.api"]
+namespaces = false
+
+[tool.setuptools.exclude-package-data]
+src = ["market_research/**", "migrations/**"]
+
+[tool.setuptools.package-data]
+"market_research.data" = ["migrations/*.sql"]
+webapp = ["static/*.html", "static/*.js", "static/*.css", "static/vendor/*"]

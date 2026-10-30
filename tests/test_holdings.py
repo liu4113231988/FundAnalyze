@@ -18,7 +18,6 @@ import warnings
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:                                             # noqa: BLE001
@@ -27,8 +26,8 @@ except Exception:                                             # noqa: BLE001
 import numpy as np
 import pandas as pd
 
-from src import config as C
-from src import holdings as H
+import market_research.config as C
+import market_research.funds.holdings as H
 
 FAILS = []
 CODE = "110022"
@@ -112,7 +111,7 @@ def t4():
     exp = H.semiannual_exposure(hd, m)
     panel = None
     try:
-        from src import data as D
+        import market_research.data.marketdata as D
         panel = D.load_panel(CODE, verbose=False)
     except Exception as e:                                    # noqa: BLE001
         print(f"  （跳过 panel：{type(e).__name__}）")

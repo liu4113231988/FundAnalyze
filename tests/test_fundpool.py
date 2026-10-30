@@ -11,7 +11,6 @@ import warnings
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:                                             # noqa: BLE001
@@ -19,8 +18,8 @@ except Exception:                                             # noqa: BLE001
 
 import pandas as pd
 
-from src import fundpool as F
-from src import config as C
+import market_research.funds.universe as F
+import market_research.config as C
 
 FAILS = []
 
