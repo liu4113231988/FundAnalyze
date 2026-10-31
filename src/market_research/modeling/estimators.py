@@ -460,7 +460,7 @@ def _fit_krr(X, y, cols, equity_ratio, prm):
     sd = X.std(0)
     sd = np.where(sd == 0, 1.0, sd)
     Xn = X / sd
-    a_grid = _alpha_ladder(0.3, float(prm.get("alpha_scale", 1.0)))
+    a_grid = _alpha_ladder(float(prm.get("alpha", 0.3)), 1.0)
     g_base = 1.0 / max(Xn.shape[1], 1)
     g_grid = [g_base * f * max(float(prm.get("gamma_scale", 1.0)), 1e-3)
               for f in (0.3, 1.0, 3.0)]

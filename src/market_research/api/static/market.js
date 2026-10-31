@@ -14,7 +14,7 @@ window.MarketApp = (() => {
     el('marketStatus').classList.toggle('is-error', error);
   }
   function switchKind(next) {
-    if (!views[next]) return;
+    if (!views[next] || (catalog && next === kind && el('marketStart').value)) return;
     views[kind] = { code: el('codeInput').value, result,
       start: el('marketStart').value, end: el('marketEnd').value,
       adjust: el('marketAdjust').value, benchmark: el('marketBenchmark').value };
@@ -25,10 +25,13 @@ window.MarketApp = (() => {
     charts.forEach(c => c.dispose()); charts.clear();
     document.querySelectorAll('[data-asset]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.asset === kind)));
     el('marketView').hidden = kind === 'fund';
+    el('fundView').hidden = kind !== 'fund';
     el('main').hidden = kind !== 'fund' || !fund.hasResult();
     el('empty').hidden = kind !== 'fund' || fund.hasResult();
     el('progressWrap').hidden = true;
     el('runBtn').disabled = false;
+    el('marketRecalculate').disabled = el('marketRefresh').disabled = false;
+    el('fundApply').disabled = false;
     el('runBtn').removeAttribute('aria-busy');
     alert(null); status(null);
     el('codeInput').value = views[kind].code || '';
@@ -36,6 +39,7 @@ window.MarketApp = (() => {
     const items = kind === 'fund' ? catalog.known_funds : kind === 'stock' ? catalog.assets.stocks : catalog.assets.indices;
     el('presetSel').replaceChildren(new Option('— 示例 —', ''), ...items.map(x => new Option(`${x.code} ${x.name}`, x.code)));
     el('presetSel').setAttribute('aria-label', kind === 'fund' ? '示例基金' : kind === 'stock' ? '示例股票' : '示例指数');
+    el('presetSel').title = kind === 'fund' ? '示例基金' : kind === 'stock' ? '示例股票' : '示例指数';
     if (kind === 'fund') {
       if (fund.hasResult()) fund.show();
       return;
@@ -66,16 +70,19 @@ window.MarketApp = (() => {
     const form = el('marketFilters');
     if (!form.reportValidity()) return;
     if (el('marketStart').value >= el('marketEnd').value) { status('开始日期需早于结束日期。', true); return; }
+    if (Date.parse(el('marketEnd').value) - Date.parse(el('marketStart').value) < 30 * 86400000) { status('分析区间最短需 30 个自然日，请扩大区间。', true); return; }
     const token = ++generation;
     const body = {kind, code, start: el('marketStart').value, end: el('marketEnd').value,
       adjust: el('marketAdjust').value, benchmark: el('marketBenchmark').value, refresh};
     el('runBtn').disabled = true; el('runBtn').setAttribute('aria-busy', 'true');
+    el('marketRecalculate').disabled = el('marketRefresh').disabled = true;
     status(`正在读取 ${code} 的日线行情…`);
     try {
       const request = await requestData('/api/market/analyze', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
-      for (let i = 0; i < 180; i++) {
+      while (token === generation) {
         if (token !== generation) return;
         await new Promise(resolve => setTimeout(resolve, 700));
+        if (token !== generation) return;
         const job = await requestData('/api/job/' + request.job_id);
         if (token !== generation) return;
         if (job.status === 'error') throw new Error(job.error);
@@ -83,14 +90,16 @@ window.MarketApp = (() => {
         if (job.status === 'done') {
           const response = await requestData('/api/result/' + request.job_id);
           if (token !== generation) return;
-          result = response.result; render(result); status(null); return;
+          result = response.result; render(result);
+          const changed = body.start !== el('marketStart').value || body.end !== el('marketEnd').value
+            || body.adjust !== el('marketAdjust').value || body.benchmark !== el('marketBenchmark').value;
+          status(changed ? '设置已更改，当前图表对应提交时的设置；点击「应用区间」更新结果。' : null); return;
         }
       }
-      throw new Error('等待行情超时，请稍后重试；已缓存的数据仍会保留。');
     } catch (error) {
       if (token === generation) status('分析失败：' + error.message, true);
     } finally {
-      if (token === generation) { el('runBtn').disabled = false; el('runBtn').removeAttribute('aria-busy'); }
+      if (token === generation) { el('runBtn').disabled = false; el('runBtn').removeAttribute('aria-busy'); el('marketRecalculate').disabled = el('marketRefresh').disabled = false; }
     }
   }
   function plot(id, dates, series, percent = false, extra = {}) {
@@ -106,7 +115,7 @@ window.MarketApp = (() => {
   function price() {
     const s = result.series;
     document.querySelectorAll('[data-chart]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.chart === chartType)));
-    const technical = kind === 'stock' ? result.technical : null;
+    const technical = result.technical;
     const markers = technical ? technical.signals.map(signal => ({name: signal.type === 'buy' ? '关注' : '警戒', coord:[signal.date,signal.close], value:signal.type === 'buy' ? '关' : '警', itemStyle:{color:signal.type === 'buy' ? '#c88869' : '#558d7e'}})) : [];
     const base = chartType === 'line' ? line('收盘', s.close) : {name: '日线', type: 'candlestick', data: s.candles, itemStyle: {color: '#ef4a4a', color0: '#12b886', borderColor: '#ef4a4a', borderColor0: '#12b886'}};
     base.markPoint = {symbol:'pin',symbolSize:30,data:markers,label:{fontSize:10}};
@@ -118,7 +127,7 @@ window.MarketApp = (() => {
     plot('marketPrice', s.dates, [base, ...Object.entries(s.ma).map(([n, data]) => line('MA' + n, data)), ...bands]);
   }
   function renderTechnical(data) {
-    const t = kind === 'stock' ? data.technical : null;
+    const t = data.technical;
     el('stockTechnical').hidden = !t; el('stockIndicatorCharts').hidden = !t;
     if (!t) return;
     const part = (tag,text,cls) => {const e=document.createElement(tag);e.textContent=text;if(cls)e.className=cls;return e;};
@@ -134,13 +143,41 @@ window.MarketApp = (() => {
       ['RSI14',num(l.rsi),'30 / 70 为观察阈值'],['MACD 柱',num(l.macd),'2 × (DIF − DEA)'],
       ['ATR14',num(l.atr),`约为收盘价 ${pct(t.levels.atr_distance)}`],['成交量比',l.volume_ratio==null?'—':num(l.volume_ratio)+' 倍','对比此前 20 日均量'],
     ].map(([label,value,note])=>{const box=part('div','');box.append(part('span',label),part('strong',value),part('small',note));return box;}));
-    const basis=data.meta.adjust==='hfq'?'后复权':data.meta.adjust==='qfq'?'前复权':'不复权';
+    const context=t.context, values=context?.latest || {};
+    el('technicalContext').replaceChildren(...(context ? [
+      ['基准环境',context.environment,context.benchmark],
+      ['相对基准 · 20日',pct(values.relative20),`60日 ${pct(values.relative60)}`],
+      ['ADX14',num(values.adx),'趋势强度，不表示涨跌方向'],
+      ['ATR 历史分位',pct(values.atr_percentile),`布林带宽分位 ${pct(values.bandwidth_percentile)}`],
+      ['成交确认',values.volume_ratio==null?'—':num(values.volume_ratio)+' 倍',`成交额比 ${num(values.amount_ratio)} · 换手率比 ${num(values.turnover_ratio)}`],
+    ].map(([label,value,note])=>{const box=part('div','');box.append(part('span',label),part('strong',value),part('small',note));return box;}) : []));
+    el('technicalContextNote').textContent = context ? context.note + ' 缺失数据以 — 显示；相对比较本身时强弱为零。' : '';
+    el('technicalValidation').replaceChildren(...t.forecasts.map(f=>{
+      const box=part('article','','forecast-block'), c=f.comparison;
+      box.append(part('h5',`${f.horizon}日 · 原模型 / 候选模型`));
+      if(!c?.n){box.append(part('p','共同成熟样本不足，暂不比较。'));return box;}
+      box.append(part('p',`${c.n} 笔 · ${c.start} — ${c.end}`),
+        part('p',`方向准确率 ${pct(c.base.accuracy)} / ${pct(c.candidate.accuracy)}`),
+        part('p',`Brier ${c.base.brier.toFixed(4)} / ${c.candidate.brier.toFixed(4)} · 改善 ${c.brier_improvement.toFixed(4)}`),
+        part('p',c.ok?'达到展示样本门槛，仍需独立测试验证。':'少于20笔，不判断候选优劣。'));
+      box.append(part('p',`候选当前上涨概率 ${pct(f.candidate?.probability)} · 仅作对照`));
+      const regimeNames={strong:'基准偏强',weak:'基准偏弱',mixed:'分歧 / 震荡',unknown:'环境未知'};
+      for(const row of c.regimes || []) {
+        box.append(part('p',`${regimeNames[row.regime]} · ${row.n}笔` + (row.n ? ` · Brier ${row.base.brier.toFixed(4)} / ${row.candidate.brier.toFixed(4)}` : '') + (row.ok ? '' : ' · 样本不足20笔')));
+      }
+      for(const key of ['base','candidate']) {
+        box.append(part('strong',key==='base'?'原模型概率分组':'候选模型概率分组'));
+        for(const bin of c[key].calibration) box.append(part('p',`${pct(bin.lower)}～${pct(bin.upper)} · ${bin.n}笔 · 平均预测 ${pct(bin.probability)} / 实际上涨 ${pct(bin.frequency)}`));
+      }
+      return box;
+    }));
+    const basis=kind==='index'?'指数点位':data.meta.adjust==='hfq'?'后复权':data.meta.adjust==='qfq'?'前复权':'不复权';
     el('technicalLevels').replaceChildren(...[
       ['前 20 日低点',t.levels.support],['前 20 日高点',t.levels.resistance],['风控观察线 · 收盘 − 2ATR',t.levels.atr_stop_reference],
     ].map(([label,value])=>{const box=part('p','');box.append(part('span',label),part('strong',num(value)));return box;}),part('small',`${basis}坐标；支撑/阻力可能失效，观察线不保证成交，也不是基于持仓成本的止损。`));
     el('stockForecasts').replaceChildren(...t.forecasts.map(f=>{
       const box=part('article','','forecast-block');box.append(part('h5',`${f.horizon} 个交易日后 · 方向估计`));
-      if(!f.ok){box.append(part('strong','样本不足'),part('p',f.reason+' 新增股票可等待数据中心补齐历史后重试。'));return box;}
+      if(!f.ok){box.append(part('strong','样本不足'),part('p',f.reason+' 可等待数据中心补齐历史后重试。'));return box;}
       const e=f.evaluation;
       box.append(part('strong',pct(f.probability)),part('p','模型估计上涨概率 · 当前收盘至未来收盘'));
       box.append(part('span',!e.ok?'验证样本不足':e.advantage?'历史 Brier 优于频率基准':'历史 Brier 未优于频率基准','forecast-verdict'));
@@ -177,7 +214,7 @@ window.MarketApp = (() => {
     }));
     price();
     renderTechnical(data);
-    el('marketPriceNote').textContent = 'MA20 / MA60 / MA120 为简单均线。股票叠加布林带（20 日均值 ± 2 倍总体标准差）及最近条件标记；样本不足时留空。';
+    el('marketPriceNote').textContent = 'MA20 / MA60 / MA120 为简单均线。叠加布林带（20 日均值 ± 2 倍总体标准差）及最近条件标记；样本不足时留空。';
     const series = data.series;
     el('marketVolumeUnit').textContent = `（${m.volume_unit}）`;
     el('marketVolumeNote').textContent = series.volume ? `最近交易日成交量 ${num(s.latest_volume)} ${m.volume_unit}` : '数据源未提供成交量。';

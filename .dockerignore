@@ -1,0 +1,17 @@
+# Allow only the files needed to install the application.
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+!src/**
+!compat/
+!compat/**
+
+# Exclude generated files even within source directories.
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.egg-info/

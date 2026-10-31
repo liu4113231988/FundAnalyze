@@ -18,7 +18,8 @@ class WindowRequest(RequestModel):
 
     @model_validator(mode="after")
     def window(self):
-        self.start, self.end = parse_window(self.start, self.end, min_days=30 if isinstance(self, MarketRequest) else None)
+        minimum = 30 if isinstance(self, MarketRequest) else 0 if isinstance(self, BacktestRequest) else None
+        self.start, self.end = parse_window(self.start, self.end, min_days=minimum)
         return self
 
 
@@ -77,6 +78,25 @@ class RefitRequest(FundWindow):
 class BacktestRequest(FundWindow):
     model: str = "enet_slsqp"
     cost_rate: float | None = Field(default=None, ge=0, le=.05)
+    window_start: str | None = None
+    window_end: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    max_rebal: int | None = None
+
+    @field_validator("max_rebal", mode="before")
+    @classmethod
+    def rebal(cls, value):
+        return _parse_max_rebal(value)
+
+    @model_validator(mode="after")
+    def analysis_settings(self):
+        self.window_start, self.window_end = parse_window(self.window_start, self.window_end)
+        _check_params({self.model: self.params})
+        if self.start and self.window_start and self.start < self.window_start:
+            raise ValueError("回测开始日期不能早于分析窗口")
+        if self.end and self.window_end and self.end > self.window_end:
+            raise ValueError("回测结束日期不能晚于分析窗口")
+        return self
 
     @field_validator("model")
     @classmethod

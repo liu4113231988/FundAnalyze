@@ -49,6 +49,12 @@ node tests/browser/controls_browser.cjs
 
 测试会操作 CDP 实例中的页面，截图/状态产物在 `output/ui-evidence/`。不要连接日常使用的浏览器配置。`tests/browser/dom_check.js` 是另一项 jsdom 检查，需额外具备它导入的 Node 依赖；不是上述无额外依赖 CDP 套件的前提。
 
+基金页单独检查：`node tests/browser/fund_browser.cjs http://127.0.0.1:8877 path/to/fund-result.json`。JSON 应为本地可信基金分析结果（`/api/result/{jid}` 响应中的 result 对象），默认使用 `output/ui-evidence/fund-style-fixture.json`。测试拦截分析请求，不提交真实计算，覆盖空状态、区间下限、日期参数、缓存结果图表、切换入口及手机布局。
+
+全局状态检查：`node tests/browser/global_audit.cjs`。另需本地可信 `output/ui-evidence/stock-fixture.json`，与基金结果一起用于离线响应。覆盖市场区间下限、重复入口点击、股票/指数图表、手动模型保留、过期回测、拟合参数传递、相关窗口重置及三类入口的手机布局。请顺序运行浏览器套件，它们使用同一个专用测试标签页。
+
+新增环境与候选模型渲染检查可运行 `node tests/browser/global_audit.cjs http://127.0.0.1:8877 output/ui-evidence/context-fixture.json`，第三个参数为带 `technical.context` 和候选对比结果的可信行情结果文件。本轮采用确定性合成行情生成该文件，只验证界面与计算契约，不据其表现评价投资效果。`tests/market/test_context.py` 覆盖新增指标已知答案、候选预测前缀稳定性、共同成熟日期、缺失降级及指数生产入口。
+
 ## 实际基金计算与打包
 
 ```powershell
@@ -63,5 +69,9 @@ uv build
 wheel 检查应在独立虚拟环境安装构建产物，在源码目录之外验证控制台命令、静态资源和 SQL 可读取；源码兼容脚本不是安装包用户的调用方式。
 
 ## 已有验证记录
+
+股票/指数第二批：84项unittest通过，新增6项验证冻结训练截止日、标签不跨开发边界、环境分组穷尽、缺字段降级、清单校验和小样本统计处理；可选成交字段修正后相关6项复查通过。两套前端回归及带环境分组的全局浏览器检查通过。真实缓存评估按固定6证券清单运行，3只缺缓存保留为未覆盖，详见[验证流程](../docs/股票指数验证流程.md)。
+
+2026-10-31 全局检查实际执行：73 项 unittest、两套数值回归、两套前端回归通过；基金、控件、数据中心和新增全局状态共四套 Edge 检查通过。完整范围与未覆盖项见[全局页面检查](../docs/全局页面检查_2026-10-31.md)。
 
 最近代码调整记录为 68 项 unittest 通过、两套独立数值回归通过、两套前端回归通过、4 套 Edge 页面检查通过；统一 CLI 另验证 14 个子命令帮助和 wheel 独立安装。证据位于本地 output 日志和界面产物，通常不随 Git 分发。本次文档更新未重新执行完整研究和浏览器回归，记录不承诺其他机器、数据版本或网络下相同结果。

@@ -141,7 +141,7 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
     if job_id:
         JOBS.update(job_id, stage="计算收益、风险与基准比较", progress=0.8)
     technical = None
-    if kind == "stock":
+    if kind in ("stock", "index"):
         from market_research.market.technical import analyze_technical
         import market_research.tasks.sync as sync
         if job_id:
@@ -162,7 +162,20 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
         invalid = (context[["open", "close", "high", "low"]] <= 0).any(axis=1)
         if invalid.any():
             context = context.loc[context.index > context.index[invalid][-1]]
-        technical = analyze_technical(context, display_start=bars.index[0], adjust=adjust)
+        reference_context = reference
+        if benchmark == code:
+            reference_context = context.close
+        elif reference is not None:
+            cached_reference = sync.cached('index', benchmark, '', warm_start, end)
+            if cached_reference is not None:
+                overlap = cached_reference.index.intersection(reference.index)
+                if len(overlap) == len(reference) and np.allclose(cached_reference.loc[overlap, 'close'], reference.loc[overlap]):
+                    reference_context = cached_reference.close
+        technical = analyze_technical(context, display_start=bars.index[0], adjust=adjust,
+                                      reference=reference_context, benchmark=benchmark)
+        if kind == 'index':
+            technical['notices'] = [n for n in technical['notices'] if '复权' not in n]
+            technical['notices'].append('指数为价格指数；技术条件未在实际ETF成交、费用与跟踪偏差上验证。')
     payload = market_payload(kind, code, bars, reference, benchmark, adjust, warnings)
     payload["quality"] = market_quality(bars, reference, start, end)
     quality = payload["quality"]

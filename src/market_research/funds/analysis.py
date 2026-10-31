@@ -302,10 +302,14 @@ def refit_single(code: str, model_key: str,
 
 def backtest_fund(code: str, model_key: str = "enet_slsqp",
                   auto_equity: bool = True,
-                                  start_date: Optional[str] = None,
-                                  end_date: Optional[str] = None,
-                                  cost_rate: Optional[float] = None,
-                  job_id: Optional[str] = None) -> dict:
+                  start_date: Optional[str] = None,
+                  end_date: Optional[str] = None,
+                  cost_rate: Optional[float] = None,
+                  job_id: Optional[str] = None,
+                  window_start: Optional[str] = None,
+                  window_end: Optional[str] = None,
+                  params: Optional[dict] = None,
+                  max_rebal: Optional[int] = None) -> dict:
     """
     拟合 → 健康度买卖决策 → 指定日期区间的回测。
 
@@ -320,14 +324,15 @@ def backtest_fund(code: str, model_key: str = "enet_slsqp",
         if job_id:
             JOBS.update(job_id, stage=stage, progress=pct)
 
-    # ★ 回测区间同样受 2 年下限约束（C.MIN_WINDOW_DAYS）：样本太短时
-    #   warmup + 滚动窗口会吃掉大部分数据，回测数字只是噪声。
-    #   注意 panel **不**按 start_date 裁剪 —— 回测区间之前的数据要留给
-    #   模型做拟合与预热，裁剪由 run_backtest 在回测层做。
-    start_date, end_date = _parse_window(start_date, end_date)
+    # 拟合窗口与回测展示区间分开；预热历史保留在 panel 中。
+    # 回测层另检查实际至少 60 个交易日，不把两年拟合下限套到展示区间。
+    start_date, end_date = _parse_window(start_date, end_date, min_days=0)
+    window_start, window_end = _parse_window(window_start, window_end)
+    params = _check_params({model_key: params or {}})
 
     prog("加载数据", 0.1)
-    panel = D.load_panel(code, verbose=False)
+    panel = D.load_panel(code, start=window_start or C.START_DATE,
+                         end=window_end, verbose=False)
     nav = panel["__FUND__"]
     name = (C.DEMO_FUNDS.get(code) or C.EXTENDED_FUNDS.get(code)
             or _guess_name(code))
@@ -335,8 +340,8 @@ def backtest_fund(code: str, model_key: str = "enet_slsqp",
     prog(f"滚动拟合 {MODELS[model_key].name}", 0.25)
     zoo_cfg = {**C.RBSA, "auto_equity": bool(auto_equity)}
     zoo = ModelZoo(zoo_cfg)
-    rep = zoo.run(panel, [model_key], workers=1,
-                  max_rebal=C.RBSA["max_rebal"])[model_key]
+    rep = zoo.run(panel, [model_key], params=params, workers=1,
+                  max_rebal=C.RBSA["max_rebal"] if max_rebal is None else max_rebal)[model_key]
 
     syn_ret = rep.syn_ret
     syn_nav = np.exp(syn_ret.cumsum())

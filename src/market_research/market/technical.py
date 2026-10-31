@@ -79,7 +79,7 @@ def features_for(bars, ind):
     return features.replace([np.inf, -np.inf], np.nan)
 
 
-def direction_forecast(bars, features, horizon, display_start):
+def direction_forecast(bars, features, horizon, display_start, training_end=None):
     """Fixed model; train labels must have matured by each prediction close.
 
     Scaler is fitted only on training rows. No shuffled CV or full-sample tuning.
@@ -90,12 +90,16 @@ def direction_forecast(bars, features, horizon, display_start):
     probability = pd.Series(np.nan, index=bars.index)
     baseline = probability.copy()
     model, fitted_at, training_rows = None, -REFIT, 0
+    cutoff = bars.index.searchsorted(pd.Timestamp(training_end), side='right') - 1 if training_end else None
+    last_train_end = None
     for i in range(len(bars)):
         if features.iloc[i].isna().any():
             continue
-        if i - fitted_at >= REFIT:
+        train_end = max(0, min(i, cutoff) - horizon + 1) if cutoff is not None else max(0, i - horizon + 1)
+        freeze_due = cutoff is not None and i >= cutoff and last_train_end != train_end
+        if (i - fitted_at >= REFIT or freeze_due) and train_end != last_train_end:
             # Last eligible feature at i-h has target ending at i (known now).
-            train = features.iloc[:max(0, i - horizon + 1)].dropna().tail(MAX_TRAIN)
+            train = features.iloc[:train_end].dropna().tail(MAX_TRAIN)
             target = labels.reindex(train.index).dropna()
             train = train.reindex(target.index)
             if len(train) >= MIN_TRAIN:
@@ -107,6 +111,7 @@ def direction_forecast(bars, features, horizon, display_start):
                     model = None
                 prior = float(target.mean())
                 fitted_at = i
+                last_train_end = train_end
         if model is not None:
             probability.iloc[i] = model.predict_proba(features.iloc[[i]])[0, 1]
             baseline.iloc[i] = prior
@@ -136,7 +141,55 @@ def direction_forecast(bars, features, horizon, display_start):
             "reason": "至少需要 252 个已成熟训练样本及约 65 日指标预热；单一涨跌类别无法训练。" if pd.isna(latest) else None}
 
 
-def analyze_technical(bars, display_start=None, adjust="qfq"):
+def compare_forecasts(bars, base, candidate, horizon, display_start, context=None):
+    """Compare fixed candidates on identical mature non-overlapping observations."""
+    prices = bars.close.loc[display_start:]
+    actual = (prices.shift(-horizon) / prices - 1).where(prices.shift(-horizon).notna())
+    frame = pd.DataFrame({'base': base['series'], 'candidate': candidate['series'],
+                          'return': actual}, index=prices.index).dropna()
+    positions = bars.index.get_indexer(frame.index)
+    keep, last = [], -horizon
+    for i, position in enumerate(positions):
+        if position >= last + horizon:
+            keep.append(i); last = position
+    frame = frame.iloc[keep]
+    n = len(frame)
+    result = {'n': n, 'ok': n >= 20, 'start': None, 'end': None,
+              'note': '共同成熟日期比较；候选固定，未据此自动选模型。Brier改善不代表显著性或扣费收益。'}
+    if not n:
+        return result
+    result.update(start=frame.index[0].date().isoformat(), end=frame.index[-1].date().isoformat())
+    target = (frame['return'] > 0).astype(float)
+    for key in ('base', 'candidate'):
+        probability = frame[key]
+        bins = []
+        for i in range(5):
+            group = (probability >= i / 5) & ((probability < (i+1) / 5) if i < 4 else (probability <= 1))
+            if group.any():
+                bins.append({'lower': i/5, 'upper': (i+1)/5, 'n': int(group.sum()),
+                             'probability': float(probability[group].mean()),
+                             'frequency': float(target[group].mean())})
+        result[key] = {'accuracy': float(((probability >= .5) == target).mean()),
+                       'brier': float(((probability - target)**2).mean()), 'calibration': bins}
+    result['brier_improvement'] = result['base']['brier'] - result['candidate']['brier']
+    if context is not None:
+        from market_research.market.context import market_regimes
+        regimes = market_regimes(context).reindex(frame.index).fillna('unknown')
+        result['regimes'] = []
+        for name in ('strong', 'weak', 'mixed', 'unknown'):
+            mask = regimes == name
+            count = int(mask.sum())
+            item = {'regime': name, 'n': count, 'ok': count >= 20}
+            if count:
+                for key in ('base', 'candidate'):
+                    p, y = frame.loc[mask, key], target[mask]
+                    item[key] = {'accuracy': float(((p >= .5) == y).mean()),
+                                 'brier': float(((p-y)**2).mean())}
+            result['regimes'].append(item)
+    return result
+
+
+def analyze_technical(bars, display_start=None, adjust="qfq", reference=None, benchmark=""):
     display_start = display_start or bars.index[0]
     # Bound CPU and memory while keeping ~5 years for rolling model warm-up.
     truncated = len(bars) > 1500
@@ -144,6 +197,11 @@ def analyze_technical(bars, display_start=None, adjust="qfq"):
     ind = indicators(bars)
     latest, close = ind.iloc[-1], float(bars.close.iloc[-1])
     features = features_for(bars, ind)
+    from market_research.market.context import context_features, context_payload
+    extra = context_features(bars, ind, reference)
+    available = extra.columns.tolist()
+    # Schema is fixed by available data fields, never selected by future coverage.
+    expanded = features.join(extra[available])
     ready = pd.notna(latest.score)
     if not ready:
         action, trend = "等待样本", "样本不足"
@@ -186,10 +244,17 @@ def analyze_technical(bars, display_start=None, adjust="qfq"):
         notices.append("价位按前复权坐标显示；历史截止日分析时尤其需核对真实报价后再考虑执行。")
     stop = close - 2 * latest.atr if pd.notna(latest.atr) else np.nan
     forecasts = [direction_forecast(bars, features, h, display_start) for h in (5, 20)]
+    for forecast in forecasts:
+        candidate = direction_forecast(bars, expanded, forecast['horizon'], display_start) if available else None
+        forecast['comparison'] = (compare_forecasts(bars, forecast, candidate, forecast['horizon'], display_start, extra)
+                                  if candidate else {'n': 0, 'ok': False, 'note': '新增特征覆盖不足，保留原模型。'})
+        forecast['candidate'] = ({'ok': candidate['ok'], 'probability': candidate['probability'],
+                                  'features': available} if candidate else None)
     disagreements = [str(f["horizon"]) for f in forecasts if f["ok"] and ready and
                      ((latest.score >= 60 and f["probability"] < .4) or (latest.score <= -60 and f["probability"] > .6))]
     conflict = ("规则趋势与 " + " / ".join(disagreements) + " 日模型方向存在分歧，请结合验证表现等待确认。") if disagreements else None
     return {"as_of": bars.index[-1].date().isoformat(), "ready": ready, "trend": trend, "action": action, "conflict": conflict,
+            'context': context_payload(extra, benchmark),
             "score": latest.score, "reasons": reasons,
             "latest": latest.to_dict(),
             "levels": {"support": latest.support, "resistance": latest.resistance,

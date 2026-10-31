@@ -1,6 +1,6 @@
 """Web 请求的模型参数校验；不依赖 Flask 或任务调度。"""
 import market_research.config as C
-from market_research.modeling.catalog import MODEL_ORDER
+from market_research.modeling.catalog import MODEL_ORDER, _default_params
 from market_research.validation.window import parse_window as _parse_window
 
 MAX_REBAL_HARD = 2000
@@ -71,19 +71,40 @@ def _parse_auto_equity(body: dict) -> bool:
 
 
 def _check_params(params):
-    """params 必须是 {模型: {超参: 有限数值}}，且模型名已知。"""
-    if not params:
+    """按公开模型目录校验参数，拒绝被估计器静默截断或忽略的输入。"""
+    if params is None:
         return {}
     if not isinstance(params, dict):
         raise ValueError("params 必须是对象")
+    defaults = _default_params()
+    integers = {'max_assets', 'top_k', 'n_components', 'half_life',
+                'n_iter', 'max_depth', 'max_iter', 'n_estimators'}
     for m, p in params.items():
         if m not in MODEL_ORDER:
             raise ValueError(f"未知模型：{m}")
         if not isinstance(p, dict):
             raise ValueError(f"params[{m}] 必须是对象")
         for k, v in p.items():
+            label = f"params[{m}][{k}]"
+            if k not in defaults[m]:
+                raise ValueError(f"{label} 是未知参数")
+            if k == 'hidden':
+                if (not isinstance(v, (list, tuple)) or not v
+                        or any(isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in v)):
+                    raise ValueError(f"{label} 必须是非空的正整数层宽列表")
+                continue
             if isinstance(v, bool) or not isinstance(v, (int, float)):
-                raise ValueError(f"params[{m}][{k}] 必须是数值")
+                raise ValueError(f"{label} 必须是数值")
             if not _finite(v):
-                raise ValueError(f"params[{m}][{k}] 必须是有限数值")
+                raise ValueError(f"{label} 必须是有限数值")
+            if k in integers and (v <= 0 or int(v) != v):
+                raise ValueError(f"{label} 必须是正整数")
+            if k == 'l1_ratio' and not 0 <= v <= 1:
+                raise ValueError(f"{label} 必须在 0 到 1 之间")
+            if k == 'min_weight' and not 0 <= v < 1:
+                raise ValueError(f"{label} 必须大于等于 0 且小于 1")
+            if k == 'alpha' and m == 'mlp' and v == 0:
+                continue
+            if k not in integers | {'l1_ratio', 'min_weight'} and v <= 0:
+                raise ValueError(f"{label} 必须大于 0")
     return params

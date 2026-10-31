@@ -78,8 +78,15 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     await evaluate("window.__dcMode='empty'"); await click('#refreshSync');
     await until("!document.querySelector('#refreshSync').disabled");
     assert.equal(await evaluate("document.querySelector('#syncEmpty').hidden"),false);
+    assert.equal(await evaluate("document.querySelector('#syncFeedback').hidden"),true);
     await capture('polish-empty-data');
-    await evaluate('window.fetch=window.__dcFetch'); await click('#refreshSync');
+    // A mutation during an older status request must trigger a trailing refresh.
+    await evaluate(`window.__dcMode='partial';window.__dcReads=0;window.__dcWrappedFetch=window.fetch;
+      window.fetch=async(url,options)=>{if(url==='/api/sync')window.__dcReads++;return window.__dcWrappedFetch(url,options);}`);
+    await click('#refreshSync');
+    await set('addAssetCode','600519'); await click('#addAssetButton');
+    await until("window.__dcReads>=2 && !document.querySelector('#refreshSync').disabled");
+    await evaluate("window.fetch=window.__dcFetch;document.querySelector('#assetKind').value='';document.querySelector('#assetKind').dispatchEvent(new Event('change',{bubbles:true}))"); await click('#refreshSync');
     await until("document.querySelectorAll('#syncAssetRows tr').length>4 && !document.querySelector('#refreshSync').disabled");
     await command('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
     await evaluate("window.dispatchEvent(new Event('resize'))"); await delay(250);

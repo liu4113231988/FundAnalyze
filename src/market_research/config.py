@@ -26,7 +26,8 @@ for _d in (DATA_DIR, FIG_DIR, RES_DIR):
 #     胜率分母只计有效前瞻标签、最大回撤从初始资本起算、R² 保留负值、
 #     夏普诊断改为 IR 口径；结果缓存键另绑定 data_stamp。
 #     ★ 改口径必须 +1：否则旧口径产出的 .pkl 仍会命中，且不会被清扫。
-CACHE_VERSION = 7
+# 8 = 核岭回归读取公开 alpha 参数，避免调参后命中旧的无效结果。
+CACHE_VERSION = 8
 
 # 数据缓存版本：修改 align_prices / 覆盖率阈值 / 候选池等取数口径后 +1，
 # 旧版 output/data/panel_*.csv 会被自动判为过期并重新抓取。

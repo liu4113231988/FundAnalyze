@@ -491,10 +491,11 @@ function showAlert(msg) {
 
 // 代码合法但名录里查不到时给个提示。查不到也可能只是名录接口不可用，
 // 所以只在「明确查到名录且未命中」时才提示，且不阻断分析。
-async function checkName(code) {
+async function checkName(code, token = fundGeneration) {
   try {
     const r = await api(`/api/name/${code}`);
-    if (r && r.found === false && !r.error) {
+    if (token === fundGeneration && (!window.MarketApp || MarketApp.kind === 'fund')
+        && $('codeInput').value.trim() === code && r && r.found === false && !r.error) {
       showAlert(`未在基金名录中查到 ${code}，请确认代码是否正确。`);
     }
   } catch (e) { /* 名录查询失败不阻断主流程 */ }
@@ -515,20 +516,29 @@ async function checkName(code) {
     sel.appendChild(o);
   });
   const chips = $('emptyChips');
-  S.cat.known_funds.slice(0, 10).forEach(f => {
-    const c = document.createElement('div');
-    c.className = 'chip'; c.textContent = f.code;
+  S.cat.known_funds.slice(0, 4).forEach(f => {
+    const c = document.createElement('button');
+    c.type = 'button'; c.className = 'market-example';
+    const name = document.createElement('strong'); name.textContent = f.name;
+    const code = document.createElement('span'); code.textContent = f.code;
+    c.append(name, code);
     c.onclick = () => { $('codeInput').value = f.code; run(f.code); };
     chips.appendChild(c);
   });
   renderModelPicker();
-  $('rebalSel').onchange = updateRunHint;
-  $('autoEquity').onchange = updateRunHint;
+  $('rebalSel').onchange = fundSettingsChanged;
+  $('autoEquity').onchange = fundSettingsChanged;
   // 改分析窗口同样要刷新提示，否则"本次将跑…近 N 年"会停在旧值
   $('windowSel').onchange = () => {
-    updateRunHint();
-    if (S.result) showAlert('分析窗口已改为近 ' + selectedWindowYears() +
-      ' 年，需重新分析后其他区块才会同步到新窗口。');
+    syncFundDates(); fundSettingsChanged();
+  };
+  for (const id of ['fundStart', 'fundEnd']) $(id).onchange = () => {
+    $('windowSel').value = 'custom'; fundSettingsChanged();
+  };
+  syncFundDates();
+  $('fundFilters').onsubmit = event => {
+    event.preventDefault();
+    run($('codeInput').value.trim() || S.result?.code || '');
   };
 
   $('searchForm').onsubmit = e => {
@@ -536,7 +546,6 @@ async function checkName(code) {
     const c = $('codeInput').value.trim();
     if (window.MarketApp && MarketApp.kind !== 'fund') { MarketApp.submit(c); return; }
     if (!/^\d{6}$/.test(c)) { showAlert('请输入 6 位数字基金代码，例如 110022'); return; }
-    checkName(c);      // 代码存在性提示（异步，不阻塞）
     run(c);
   };
   sel.onchange = e => {
@@ -551,7 +560,7 @@ async function checkName(code) {
   $('btnSaveSel').onclick = () => {
     if (!S.sel) return;
     S.best = S.sel;
-    renderModelStrip(); renderRank();
+    renderHead(); renderModelStrip(); renderRank();
     showAlert(`已把「${S.result.models[S.sel].name}」设为最佳模型基准。`);
   };
   // 滚动窗口改动 → 只重算相关性区块（/api/corr），不必重跑拟合。
@@ -567,7 +576,7 @@ async function checkName(code) {
   $('btRun').onclick = runBacktest;
   if (window.MarketApp) MarketApp.init(S.cat, {
     request: api, alert: showAlert,
-    fund: {invalidate: () => { fundGeneration++; }, hasResult: () => !!S.result, show: () => applyResult(S.result)},
+    fund: {invalidate: invalidateFund, hasResult: () => !!S.result, show: showFundResult},
   });
 })();
 
@@ -585,14 +594,14 @@ function renderModelPicker() {
   });
   $('mpQuick').onclick = () => applyPreset(S.cat.quick_models);
   $('mpFull').onclick = () => applyPreset(S.cat.full_models);
-  list.querySelectorAll('input').forEach(cb => { cb.onchange = updateRunHint; });
+  list.querySelectorAll('input').forEach(cb => { cb.onchange = fundSettingsChanged; });
   applyPreset(S.cat.quick_models);
 }
 function applyPreset(keys) {
   $('mpList').querySelectorAll('input').forEach(cb => {
     cb.checked = keys.includes(cb.dataset.k);
   });
-  updateRunHint();
+  fundSettingsChanged();
 }
 function selectedModels() {
   return [...$('mpList').querySelectorAll('input:checked')].map(cb => cb.dataset.k);
@@ -609,23 +618,70 @@ function selectedRebal() {
 function selectedWindowYears() {
   return +$('windowSel').value;
 }
-function windowStart(years) {
-  const d = new Date();
-  d.setFullYear(d.getFullYear() - years);   // 闰年 2/29 会自动落到 2/28
-  return d.toISOString().slice(0, 10);
+function fundDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function windowStart(years, end = fundDate(new Date())) {
+  const [year, month, day] = end.split('-').map(Number);
+  const targetYear = year - years;
+  const lastDay = new Date(targetYear, month, 0).getDate();
+  return `${targetYear}-${String(month).padStart(2, '0')}-${String(Math.min(day, lastDay)).padStart(2, '0')}`;
+}
+function syncFundDates() {
+  if ($('windowSel').value !== 'custom') {
+    $('fundEnd').value = $('fundEnd').value || fundDate(new Date());
+    $('fundStart').value = windowStart(selectedWindowYears(), $('fundEnd').value);
+  }
+  updateRunHint();
+}
+function selectedFundWindow() {
+  const start = $('fundStart').value, end = $('fundEnd').value;
+  const a = Date.parse(start + 'T00:00:00Z'), b = Date.parse(end + 'T00:00:00Z');
+  if (!start || !end || !Number.isFinite(a) || !Number.isFinite(b)) throw Error('请选择有效的基金分析起止日期。');
+  if (a >= b) throw Error('开始日期需早于结束日期。');
+  if (b - a < 730 * 86400000) throw Error('基金分析区间至少需要 2 年，请调整起止日期。');
+  return {start, end};
+}
+function fundSettingsChanged() {
+  updateRunHint();
+  updateFundStatus();
+}
+function updateFundStatus() {
+  if (!S.result) { $('fundStatus').hidden = true; return; }
+  const m = S.result.meta;
+  const changed = $('fundStart').value !== (m.window_requested || m.start)
+    || $('fundEnd').value !== (m.window_requested_end || fundDate(new Date()))
+    || (Array.isArray(m.models) && JSON.stringify([...m.models].sort()) !== JSON.stringify(selectedModels().sort()))
+    || (m.max_rebal != null && m.max_rebal !== selectedRebal())
+    || (typeof m.auto_equity === 'boolean' && m.auto_equity !== selectedAuto());
+  $('fundStatus').hidden = !changed;
+  $('fundStatus').textContent = changed ? '分析设置已更改，点击「应用区间」或「开始分析」更新结果；当前图表仍对应上次分析。' : '';
 }
 function updateRunHint() {
   const n = selectedModels().length;
   const rb = $('rebalSel').selectedOptions[0].textContent.split('·')[1].trim();
   $('runHint').textContent = `本次将跑 ${n} 个模型 · 重估点${rb}` +
     (selectedAuto() ? ' · 仓位自适应' : '') +
-    ` · 分析窗口近 ${selectedWindowYears()} 年`;
+    ($('windowSel').value === 'custom' ? ' · 自定义区间' : ` · 分析窗口近 ${selectedWindowYears()} 年`);
 }
 
 let fundGeneration = 0;
 let correlationGeneration = 0;
+function setFundBusy(busy) {
+  for (const id of ['runBtn', 'fundApply', 'btnRefresh', 'btnReLearn', 'btnApplyParams', 'btRun']) $(id).disabled = busy;
+  $('runBtn').setAttribute('aria-busy', String(busy));
+}
+function invalidateFund() {
+  fundGeneration++;
+  correlationGeneration++;
+  $('rollWin').value = String(S.rollWin);
+  setFundBusy(false);
+}
+function showFundResult() {
+  updateFundStatus();
+  Object.values(S.charts).forEach(c => c.resize());
+}
 async function updateCorrelation(win) {
-  S.rollWin = win;
   const target = S.result;
   if (!target) return;
   const token = ++correlationGeneration;
@@ -637,11 +693,14 @@ async function updateCorrelation(win) {
   try {
     const r = await api('/api/corr?' + query);
     if (token !== correlationGeneration || S.result !== target) return;
+    S.rollWin = win;
     target.correlation = r.correlation;
     renderCorr();
   } catch (error) {
-    if (token === correlationGeneration && S.result === target)
+    if (token === correlationGeneration && S.result === target) {
+      $('rollWin').value = String(S.rollWin);
       showAlert('滚动相关重算失败：' + error.message);
+    }
   }
 }
 
@@ -649,11 +708,17 @@ async function updateCorrelation(win) {
 async function run(code, opts = {}) {
   opts = opts || {};
   showAlert(null);
+  if (!/^\d{6}$/.test(code)) { showAlert('请输入 6 位数字基金代码，例如 110022'); return; }
   const models = selectedModels();
   if (!models.length) { showAlert('请至少勾选一个模型'); return; }
+  let requestedWindow;
+  try { requestedWindow = selectedFundWindow(); }
+  catch (error) { showAlert(error.message); return; }
   const token = ++fundGeneration;
+  correlationGeneration++;
+  checkName(code, token);
   const params = JSON.parse(JSON.stringify(S.params));
-  $('runBtn').disabled = true;
+  setFundBusy(true);
   $('progressWrap').hidden = false;
   setProgress('提交任务…', 0.01, '');
 
@@ -665,8 +730,8 @@ async function run(code, opts = {}) {
       auto_equity: selectedAuto(),
       // ★ 分析窗口：默认近 5 年。必须显式传给后端 —— 结果缓存键里带窗口，
       //   不传的话改窗口会命中旧结果。
-      start: windowStart(selectedWindowYears()),
-      end: null,
+      start: requestedWindow.start,
+      end: requestedWindow.end,
       refresh: !!opts.refresh,
     };
     // 强制重学：绕过结果缓存
@@ -687,7 +752,7 @@ async function run(code, opts = {}) {
     showAlert('分析失败：' + e.message);
     $('progressWrap').hidden = true;
   } finally {
-    if (token === fundGeneration) $('runBtn').disabled = false;
+    if (token === fundGeneration) setFundBusy(false);
   }
 }
 
@@ -722,12 +787,19 @@ async function poll(jid, token = fundGeneration) {
 }
 
 function applyResult(res) {
+  correlationGeneration++;
+  S.btManual = false;
+  $('btOut').hidden = true;
   S.result = res;
+  S.params = JSON.parse(JSON.stringify(res.meta.params || {}));
+  S.rollWin = res.correlation?.roll_window || 120;
+  $('rollWin').value = String(S.rollWin);
   S.best = res.meta.best_model || Object.keys(res.models)[0];
   S.sel = S.best;
   const visible = !window.MarketApp || MarketApp.kind === 'fund';
   $('empty').hidden = true;
   $('main').hidden = !visible;
+  updateFundStatus();
   renderHead();
   renderInsights();
   renderDrift();
@@ -1308,17 +1380,24 @@ async function applyParams() {
   const k = S.sel; if (!k) return;
   const spec = S.cat.models.find(m => m.key === k);
   const o = {};
-  $('tunerBody').querySelectorAll('[data-pk]').forEach(el => {
+  const fields = [...$('tunerBody').querySelectorAll('[data-pk]')];
+  for (const el of fields) {
     const pk = el.dataset.pk;
-    if (el.type === 'checkbox') { o[pk] = el.checked; return; }
+    if (el.type === 'checkbox') { o[pk] = el.checked; continue; }
     const dflt = spec.params[pk];
     let v = el.value;
-    if (pk === 'hidden') v = v.split(/[,，]/).map(x => +x).filter(x => !Number.isNaN(x));
-    else if (typeof dflt === 'number') v = Number(v);
+    if (pk === 'hidden') {
+      v = v.split(/[,，]/).map(x => Number(x.trim()));
+      if (!v.length || v.some(n => !Number.isInteger(n) || n <= 0)) { showAlert('隐藏层需填写正整数，例如 32,16'); return; }
+    } else if (typeof dflt === 'number') {
+      if (!v.trim() || !Number.isFinite(Number(v))) { showAlert(`${pk} 需填写有效数值`); return; }
+      v = Number(v);
+    }
     o[pk] = v;
-  });
+  }
   const token = ++fundGeneration;
-  S.params[k] = o;
+  correlationGeneration++;
+  setFundBusy(true);
   $('progressWrap').hidden = false;
   setProgress('重新学习 ' + spec.name, 0.02, '');
   try {
@@ -1337,7 +1416,7 @@ async function applyParams() {
   } catch (e) {
     if (token === fundGeneration) showAlert('重新学习失败：' + e.message);
   } finally {
-    if (token === fundGeneration) $('progressWrap').hidden = true;
+    if (token === fundGeneration) { $('progressWrap').hidden = true; setFundBusy(false); }
   }
 }
 
@@ -1555,15 +1634,23 @@ function syncBacktestDefaults() {
     if (st.end) $('btEnd').value = st.end;
   }
   if (S.sel && S.cat.models.some(m => m.key === S.sel)) $('btModel').value = S.sel;
-  $('btAuto').checked = $('autoEquity').checked;
+  $('btAuto').checked = S.result.meta.auto_equity;
+  for (const id of ['btStart', 'btEnd']) { $(id).min = st.start; $(id).max = st.end; }
 }
 
 async function runBacktest() {
   if (!S.result) { showAlert('请先分析一只基金'); return; }
   const start = $('btStart').value, end = $('btEnd').value;
+  const st = S.result.nav.stats;
+  const inputs = $('backtestSection').querySelectorAll('input');
+  for (const input of inputs) if (!input.reportValidity()) return;
   if (start && end && start >= end) { showAlert('起始日需早于结束日'); return; }
+  if ((start && start < st.start) || (end && end > st.end)) { showAlert('回测日期需在当前基金分析区间内'); return; }
 
-  $('btRun').disabled = true;
+  const token = ++fundGeneration;
+  correlationGeneration++;
+  setFundBusy(true);
+  showAlert(null);
   $('progressWrap').hidden = false;
   setProgress('提交回测任务…', 0.02, '');
   try {
@@ -1575,24 +1662,33 @@ async function runBacktest() {
         auto_equity: $('btAuto').checked,
         start: start || null,
         end: end || null,
+        window_start: S.result.meta.window_requested || S.result.meta.start,
+        window_end: S.result.meta.window_requested_end || S.result.meta.end,
+        params: S.result.meta.params?.[$('btModel').value] || {},
+        max_rebal: S.result.meta.max_rebal,
       })
     });
-    await pollBacktest(r.job_id);
+    if (token !== fundGeneration) return;
+    await pollBacktest(r.job_id, token);
   } catch (e) {
+    if (token !== fundGeneration) return;
     $('progressWrap').hidden = true;
     showAlert('回测失败：' + e.message);
   } finally {
-    $('btRun').disabled = false;
+    if (token === fundGeneration) setFundBusy(false);
   }
 }
 
-async function pollBacktest(jid) {
-  for (;;) {
+async function pollBacktest(jid, token = fundGeneration) {
+  while (token === fundGeneration) {
     await new Promise(r => setTimeout(r, 800));
+    if (token !== fundGeneration) return;
     const j = await api('/api/job/' + jid);
+    if (token !== fundGeneration) return;
     setProgress(j.stage, j.progress, j.detail);
     if (j.status === 'done') {
       const r = await api('/api/result/' + jid);
+      if (token !== fundGeneration) return;
       $('progressWrap').hidden = true;
       renderBacktest(r.result);
       return;

@@ -8,6 +8,8 @@ let submitted;
 let applied;
 const context = {
   fundGeneration: 0,
+  correlationGeneration: 0,
+  setFundBusy() {},
   S: {sel: 'ridge', params: {}, cat: {models: [{key: 'ridge', name: 'Ridge', params: {alpha_scale: 1}}]},
       result: {code: '110022', meta: {models: ['ridge', 'pcr'], params: {pcr: {n_components: 2}}, max_rebal: 30, auto_equity: false, window_requested: '2021-01-01', window_requested_end: null, end: '2026-01-01'}}},
   $: id => id === 'tunerBody' ? {querySelectorAll: () => [{dataset: {pk: 'alpha_scale'}, type: 'number', value: '2'}]} : {},

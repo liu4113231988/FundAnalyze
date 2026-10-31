@@ -5,7 +5,7 @@
   const dialog = $('dataCenter');
   const states = {pending: '等待同步', running: '同步中', success: '已同步', error: '同步失败'};
   const kinds = {stock: '股票', fund: '基金', index: '指数'};
-  let snapshot, busy = false;
+  let snapshot, busy = false, refreshAgain = false, readError = '', page = 1;
   const names = new Map();
   function node(tag, text, cls) {const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e;}
   function feedback(message, error = false) {$('syncFeedback').textContent = message; $('syncFeedback').hidden = !message; $('syncFeedback').classList.toggle('is-error', error);}
@@ -19,11 +19,15 @@
   function timestamp(value) {return value ? new Date(value).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai', hour12:false}) : '尚未完成';}
   function renderRows() {
     if (!snapshot) return;
-    const query = $('assetSearch').value.trim().toLowerCase(), state = $('assetState').value;
-    const filtered = snapshot.assets.filter(a => (!state || a.state === state) && `${a.code} ${names.get(a.code) || ''} ${kinds[a.kind]}`.toLowerCase().includes(query));
+    const query = $('assetSearch').value.trim().toLowerCase(), state = $('assetState').value, kind = $('assetKind').value;
+    const filtered = snapshot.assets.filter(a => (!kind || a.kind === kind) && (!state || a.state === state) && `${a.code} ${names.get(a.code) || ''} ${kinds[a.kind]}`.toLowerCase().includes(query));
     const order = {error:0, running:1, pending:2, success:3};
-    filtered.sort((a,b) => order[a.state] - order[b.state] || a.code.localeCompare(b.code));
-    const rows = filtered.map(a => {
+    filtered.sort((a,b) => order[a.state] - order[b.state] || a.code.localeCompare(b.code) || a.asset_key.localeCompare(b.asset_key));
+    const size = Number($('assetPageSize').value);
+    const pages = Math.max(1, Math.ceil(filtered.length / size));
+    page = Math.min(page, pages);
+    const offset = (page - 1) * size;
+    const rows = filtered.slice(offset, offset + size).map(a => {
       const tr = node('tr');
       const asset = node('td'); asset.append(node('strong', names.get(a.code) || a.code), node('span', `${a.code.toUpperCase()} · ${kinds[a.kind]} · ${basis(a)}`, 'asset-detail'));
       const status = node('td'); status.append(node('span', states[a.state] || '等待同步', `state-badge state-${a.state}`));
@@ -42,8 +46,14 @@
     });
     $('syncAssetRows').replaceChildren(...rows);
     $('syncEmpty').hidden = filtered.length > 0;
-    $('syncEmpty').textContent = snapshot.assets.length ? '没有符合条件的资产，试试其他代码或状态。' : '尚未添加资产，从上方添加一只证券开始。';
+    $('syncEmpty').textContent = snapshot.assets.length ? '没有符合条件的资产，试试其他类型、代码或状态。' : '尚未添加资产，从上方添加一只证券开始。';
+    $('syncPagination').hidden = false;
+    $('syncPageSummary').textContent = filtered.length ? `共 ${filtered.length} 条 · 显示 ${offset + 1}–${Math.min(offset + size, filtered.length)} 条` : '共 0 条';
+    $('syncPageNumber').textContent = filtered.length ? `第 ${page} / ${pages} 页` : '暂无数据';
+    $('syncFirstPage').disabled = $('syncPrevPage').disabled = page === 1;
+    $('syncLastPage').disabled = $('syncNextPage').disabled = page === pages;
   }
+  function resetPage() {page = 1; renderRows();}
   function render() {
     const list = snapshot.assets;
     const counts = Object.fromEntries(Object.keys(kinds).map(kind => [kind, new Set(list.filter(a => a.kind === kind).map(a => a.code)).size]));
@@ -60,11 +70,11 @@
     renderRows();
   }
   async function refresh() {
-    if (busy) return;
+    if (busy) {refreshAgain = true; return;}
     busy = true; $('refreshSync').disabled = true; $('refreshSync').textContent = '读取中…';
-    try {snapshot = await api('/api/sync'); render();}
-    catch(error) {$('syncIndicator').textContent = '同步状态不可用 · 数据中心'; feedback('无法读取同步状态：' + error.message, true); if (!snapshot) {$('syncEmpty').hidden = false; $('syncEmpty').textContent = '同步状态读取失败，请点击刷新状态重试。';}}
-    finally {busy = false; $('refreshSync').disabled = false; $('refreshSync').textContent = '刷新状态';}
+    try {snapshot = await api('/api/sync'); render(); if (readError && $('syncFeedback').textContent === readError) feedback(''); readError = '';}
+    catch(error) {$('syncIndicator').textContent = '同步状态不可用 · 数据中心'; readError = '无法读取同步状态：' + error.message; feedback(readError, true); if (!snapshot) {$('syncEmpty').hidden = false; $('syncEmpty').textContent = '同步状态读取失败，请点击刷新状态重试。';}}
+    finally {busy = false; $('refreshSync').disabled = false; $('refreshSync').textContent = '刷新状态'; if (refreshAgain) {refreshAgain = false; refresh();}}
   }
   function changeKind() {
     const kind = $('addAssetKind').value;
@@ -78,10 +88,14 @@
   dialog.addEventListener('close', () => $('openDataCenter').focus());
   dialog.addEventListener('click', event => {if(event.target === dialog) {const r=dialog.getBoundingClientRect(); if(event.clientX<r.left || event.clientX>r.right || event.clientY<r.top || event.clientY>r.bottom) dialog.close();}});
   $('refreshSync').onclick = () => {feedback(''); refresh();};
-  $('assetSearch').oninput = renderRows; $('assetState').onchange = renderRows; $('addAssetKind').onchange = changeKind;
+  $('assetSearch').oninput = resetPage; $('assetKind').onchange = resetPage; $('assetState').onchange = resetPage; $('assetPageSize').onchange = resetPage; $('addAssetKind').onchange = changeKind;
+  $('syncFirstPage').onclick = resetPage;
+  $('syncPrevPage').onclick = () => {page = Math.max(1, page - 1); renderRows();};
+  $('syncNextPage').onclick = () => {page++; renderRows();};
+  $('syncLastPage').onclick = () => {page = Number.MAX_SAFE_INTEGER; renderRows();};
   $('addAssetForm').onsubmit = async event => {
     event.preventDefault(); const button = $('addAssetButton'); button.disabled = true;
-    try {const code=$('addAssetCode').value.trim(); await api('/api/sync/assets',{kind:$('addAssetKind').value,code,basis:$('addAssetBasis').value}); feedback(`${code} 已加入研究范围；新增口径会自动补齐历史。`); $('assetSearch').value=''; $('assetState').value=''; await refresh();}
+    try {const code=$('addAssetCode').value.trim(), kind=$('addAssetKind').value; await api('/api/sync/assets',{kind,code,basis:kind==='index'?'':$('addAssetBasis').value}); feedback(`${code} 已加入研究范围；新增口径会自动补齐历史。`); $('assetSearch').value=''; $('assetState').value=''; $('assetKind').value=kind; page=1; await refresh();}
     catch(error) {feedback(error.message,true);} finally {button.disabled=false;}
   };
   $('workspaceDate').textContent = new Date().toLocaleDateString('zh-CN',{year:'numeric',month:'long',day:'numeric',weekday:'long',timeZone:'Asia/Shanghai'});

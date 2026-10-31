@@ -62,10 +62,26 @@
     <button type="submit" id="addAssetButton" class="btn primary">＋ 添加资产</button>
   </form>
   <p class="dc-help">添加后自动排队补齐历史；复权股票与基金每天校验完整历史，其他行情增量更新。</p>
-  <div class="dc-toolbar"><label class="sr-only" for="assetSearch">搜索证券名称或代码</label><input id="assetSearch" type="search" placeholder="搜索名称或代码"><label class="sr-only" for="assetState">同步状态</label><select id="assetState"><option value="">全部状态</option><option value="error">同步失败</option><option value="pending">等待同步</option><option value="running">同步中</option><option value="success">已同步</option></select><button type="button" id="refreshSync" class="btn ghost">刷新状态</button></div>
+  <div class="dc-toolbar">
+    <label class="sr-only" for="assetSearch">搜索证券名称或代码</label><input id="assetSearch" type="search" placeholder="搜索名称或代码">
+    <label class="sr-only" for="assetKind">资产类型</label><select id="assetKind"><option value="">全部类型</option><option value="stock">股票</option><option value="fund">基金</option><option value="index">指数</option></select>
+    <label class="sr-only" for="assetState">同步状态</label><select id="assetState"><option value="">全部状态</option><option value="error">同步失败</option><option value="pending">等待同步</option><option value="running">同步中</option><option value="success">已同步</option></select>
+    <button type="button" id="refreshSync" class="btn ghost">刷新状态</button>
+  </div>
   <p id="syncFeedback" class="sync-feedback" role="status" hidden></p>
   <div class="dc-table-scroll"><table class="dc-table"><thead><tr><th>资产 / 口径</th><th>同步状态</th><th>最近成功 · 北京时间</th><th>历史记录</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="syncAssetRows"></tbody></table></div>
   <p id="syncEmpty" class="dc-empty" hidden>尚未添加资产，从上方添加一只证券开始。</p>
+  <nav id="syncPagination" class="dc-pagination" aria-label="资产列表分页" hidden>
+    <span id="syncPageSummary" class="dc-page-summary" role="status"></span>
+    <label class="dc-page-size" for="assetPageSize">每页<select id="assetPageSize"><option value="10">10 条</option><option value="20" selected>20 条</option><option value="50">50 条</option><option value="100">100 条</option></select></label>
+    <div class="dc-page-actions">
+      <button id="syncFirstPage" type="button" class="btn ghost" disabled>首页</button>
+      <button id="syncPrevPage" type="button" class="btn ghost" disabled>上一页</button>
+      <span id="syncPageNumber" class="dc-page-number"></span>
+      <button id="syncNextPage" type="button" class="btn ghost" disabled>下一页</button>
+      <button id="syncLastPage" type="button" class="btn ghost" disabled>末页</button>
+    </div>
+  </nav>
   <p class="dc-footer" id="syncUpdated">状态将自动刷新</p>
 </dialog>
 
@@ -97,9 +113,12 @@
       <div class="technical-decision"><div class="decision-main"><span id="technicalTrend" class="trend-badge"></span><h4 id="technicalAction"></h4><p id="technicalScore"></p></div><ul id="technicalReasons"></ul></div>
       <p id="technicalConflict" class="technical-conflict" role="status" hidden></p>
       <div id="technicalMetrics" class="technical-metrics"></div>
+      <div id="technicalContext" class="technical-metrics" aria-label="市场环境与量价确认"></div>
+      <p id="technicalContextNote" class="note"></p>
       <div id="technicalLevels" class="technical-levels"></div>
       <div class="forecast-heading"><h4>未来方向 · 5 / 20 个交易日</h4><span>滚动逻辑回归 · 仅使用已成熟标签</span></div>
       <div id="stockForecasts" class="stock-forecasts"></div>
+      <details class="technical-details"><summary>候选模型对比与概率校准</summary><p class="note">原模型与新增量价、波动和相对强弱特征的固定候选，在共同成熟日期上比较。正的 Brier 改善表示候选误差更小；样本不足20笔不判断优劣。该比较不代表统计显著性或扣费交易收益。</p><div id="technicalValidation"></div></details>
       <details class="technical-details"><summary>规则、模型验证与使用边界</summary><p id="technicalRules"></p><p>方向模型每 21 个交易日更新，最多使用最近 756 个已成熟样本；标准化仅拟合训练数据。历史评估每隔预测周期抽取一笔，减少标签重叠。基准为当时训练集的上涨频率；Brier 越小越好。样本少于 20 笔时不判断有效性；预测概率未单独校准。</p><ul id="technicalNotices"></ul><p><a href="https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/overview" target="_blank" rel="noopener">技术指标参考 ↗</a></p></details>
     </section>
     <section class="panel market-price-panel"><div class="sec-head"><h3>价格与均线</h3><div class="seg" id="marketChartType" aria-label="价格图类型"><button type="button" data-chart="candlestick" aria-pressed="true">K 线</button><button type="button" data-chart="line" aria-pressed="false">收盘线</button></div></div><div id="marketPrice" class="chart tall" role="img" aria-label="历史价格与20、60、120日均线"></div><p class="note" id="marketPriceNote"></p></section>
@@ -126,12 +145,45 @@
 <!-- ================= 错误条 ================= -->
 <div class="alert" id="alert" role="alert" hidden></div>
 
+<!-- ================= 基金研究工作区 ================= -->
+<div id="fundView" class="fund-view market-view" hidden>
+  <section class="market-intro">
+    <div><p class="eyebrow">FUND RESEARCH</p><h2>基金分析</h2><p>从净值、风格与风险，理解一只基金。</p></div>
+    <span class="market-frequency">日频净值 <span aria-hidden="true">/</span> 风格研究</span>
+  </section>
+  <form id="fundFilters" class="market-toolbar fund-toolbar">
+    <label>分析窗口<select id="windowSel"><option value="2">近 2 年</option><option value="3">近 3 年</option><option value="5" selected>近 5 年</option><option value="10">近 10 年</option><option value="custom">自定义区间</option></select></label>
+    <label>开始日期<input type="date" id="fundStart" required></label>
+    <label>结束日期<input type="date" id="fundEnd" required></label>
+    <label>重估精度<select id="rebalSel"><option value="30">30 · 最快</option><option value="60" selected>60 · 推荐</option><option value="100">100 · 精细</option><option value="0">全部 · 最精确</option></select></label>
+    <button class="btn ghost" type="submit" id="fundApply">应用区间</button>
+  </form>
+  <p class="note fund-window-note">分析区间至少两年；修改区间、精度或模型后，点击「应用区间」更新分析。</p>
+  <details class="fund-settings">
+    <summary>模型与仓位设置<span class="hint" id="runHint"></span></summary>
+    <div class="fund-settings-body">
+      <div class="sec-tools">
+        <button type="button" class="btn ghost xs" id="mpQuick"
+          title="选择 5 个代表性模型">快速 5 个</button>
+        <button type="button" class="btn ghost xs" id="mpFull"
+          title="选择全部 11 个模型">全部 11 个</button>
+      </div>
+      <div class="model-picker" id="modelPicker">
+        <div class="mp-list" id="mpList"></div>
+        <label class="switch-inline" title="在训练窗口内估计风格组合的仓位约束，不代表已核实的真实股票持仓">
+          <input type="checkbox" id="autoEquity" checked> 仓位约束自适应（默认开启）
+        </label>
+      </div>
+    </div>
+  </details>
+  <div id="fundStatus" class="market-status" role="status" hidden></div>
+
 <!-- ================= 主体 ================= -->
-<main id="main" hidden>
+<main id="main" class="fund-results" hidden>
 
   <!-- ---------- 概况 ---------- -->
   <section class="block">
-    <div class="fund-head">
+    <div class="fund-head market-result-head">
       <div>
         <h2 id="fundName">—</h2>
         <p class="meta" id="fundMeta">—</p>
@@ -151,44 +203,23 @@
     <div class="cards" id="driftCard"></div>
   </section>
 
+  <!-- ---------- 净值走势 ---------- -->
+  <section class="block">
+    <div class="sec-head"><h3>净值走势与回撤</h3>
+      <div class="sec-tools"><span class="hint">开放式基金只有净值，无成交量，因此以收盘净值 + 涨跌幅呈现</span></div>
+    </div>
+    <div class="panel"><h4>净值走势</h4><div id="chartNav" class="chart tall"></div></div>
+    <div class="grid2">
+      <div class="panel"><h4>回撤曲线</h4><div id="chartDD" class="chart"></div></div>
+      <div class="panel"><h4>滚动 60 日年化波动</h4><div id="chartVol" class="chart"></div></div>
+    </div>
+    <div class="panel"><h4>月度收益（%）</h4><div id="chartMonthly" class="chart short"></div></div>
+  </section>
+
   <!-- ---------- 模型选择与对比 ---------- -->
   <section class="block">
     <div class="sec-head">
       <h3>机器学习模型对比</h3>
-      <div class="sec-tools">
-        <button type="button" class="btn ghost xs" id="mpQuick"
-          title="选择 5 个代表性模型">快速 5 个</button>
-        <button type="button" class="btn ghost xs" id="mpFull"
-          title="选择全部 11 个模型">全部 11 个</button>
-        <label class="switch-inline" title="重估点越密越精确，但耗时线性增长">
-          重估点
-          <select id="rebalSel" style="padding:5px 9px;border-radius:7px;
-            border:1px solid var(--line2);background:var(--bg2);color:var(--fg2);font-size:12px">
-            <option value="30">30 · 最快</option>
-            <option value="60" selected>60 · 推荐</option>
-            <option value="100">100 · 精细</option>
-            <option value="0">全部 · 最精确</option>
-          </select>
-        </label>
-        <label class="switch-inline" title="分析窗口：默认近 5 年。10 年跨度会混入风格漂移与经理变更，拟合出的画像是历史平均、对当下没有指导意义；最短 2 年，再短的话拟合窗口与预热会吃掉大部分数据">
-          分析窗口
-          <select id="windowSel" style="padding:5px 9px;border-radius:7px;
-            border:1px solid var(--line2);background:var(--bg2);color:var(--fg2);font-size:12px">
-            <option value="2">近 2 年（最短）</option>
-            <option value="3">近 3 年</option>
-            <option value="5" selected>近 5 年 · 推荐</option>
-            <option value="10">近 10 年</option>
-          </select>
-        </label>
-        <span class="hint" id="runHint"></span>
-      </div>
-    </div>
-
-    <div class="model-picker" id="modelPicker">
-      <div class="mp-list" id="mpList"></div>
-      <label class="switch-inline" title="用窗口内数据估计基金实际仓位，替换固定 90% 约束。适合低仓位/对冲基金，不引入前瞻">
-        <input type="checkbox" id="autoEquity" checked> 仓位约束自适应（默认开启；低仓位 / 对冲基金尤其需要）
-      </label>
     </div>
 
     <div class="model-strip" id="modelStrip"></div>
@@ -229,11 +260,7 @@
         <div id="chartCurve" class="chart"></div>
         <p class="note trend-note">
           <b class="tn-tag">这是形态描述，不是买卖建议。</b>
-          本项目已用 14 只基金做样本外检验证明：日频方向信号无法超越
-          <span class="mh" data-m="control">恒定仓位对照<i class="mi">?</i></span>
-          （<span class="mh" data-m="rank_ic">RankIC<i class="mi">?</i></span>
-          均值 −0.073，13/14 只为负）。色带只回答「合成基准这一段长什么样」，
-          <b>不含任何持仓含义</b>，也不代表未来。
+          色带描述合成基准在所选区间的价格形态，不代表持仓或未来方向。
           判据为<span class="mh" data-m="trend_state">高低点结构<i class="mi">?</i></span>：
           相邻两组各 N 日的「高点抬高 + 低点抬高」判为上升，双向都降低判为下降，
           其余判为震荡；拐头另需极值已落到前半段且价格回到区间两端 1/3。 </p>
@@ -264,7 +291,7 @@
   </section>
 
   <!-- ---------- 买卖决策回测 ---------- -->
-  <section class="block">
+  <section class="block" id="backtestSection">
     <div class="sec-head">
       <h3>买卖决策回测</h3>
       <div class="sec-tools">
@@ -281,6 +308,7 @@
         <button class="btn primary xs" id="btRun">运行回测</button>
       </div>
     </div>
+    <p class="note">回测沿用当前分析的拟合窗口、模型参数和重估精度；可在该窗口内选择回测日期，预热后至少需要 60 个交易日。</p>
     <p class="note" id="btRule">基于拟合诊断的<b>风险门控</b>：R² 相对自身两年中枢的下降、
       跟踪误差扩张倍数、实现 alpha 的 t 值、权重漂移速度四个分项（均为相对口径），
       按「最差项 ×0.6 + 整体均值 ×0.4」合成「健康分」——
@@ -311,19 +339,6 @@
       <h4>交易记录（决策日收盘、次一交易日执行）</h4>
       <div class="table-wrap"><table class="tbl" id="btTrades"></table></div>
     </div>
-  </section>
-
-  <!-- ---------- 净值走势 ---------- -->
-  <section class="block">
-    <div class="sec-head"><h3>净值走势与回撤</h3>
-      <div class="sec-tools"><span class="hint">开放式基金只有净值，无成交量，因此以收盘净值 + 涨跌幅呈现</span></div>
-    </div>
-    <div class="panel"><h4>累计净值</h4><div id="chartNav" class="chart tall"></div></div>
-    <div class="grid2">
-      <div class="panel"><h4>回撤曲线</h4><div id="chartDD" class="chart"></div></div>
-      <div class="panel"><h4>滚动 60 日年化波动</h4><div id="chartVol" class="chart"></div></div>
-    </div>
-    <div class="panel"><h4>月度收益（%）</h4><div id="chartMonthly" class="chart short"></div></div>
   </section>
 
   <!-- ---------- 相关性分析 ---------- -->
@@ -414,29 +429,13 @@
   </section>
 </main>
 
-<!-- ================= 空状态 ================= -->
-<div class="empty" id="empty" hidden>
-  <div class="empty-in">
-    <div class="empty-icon">
-      <svg viewBox="0 0 24 24" width="64" height="64" fill="none"
-        aria-hidden="true">
-        <circle cx="12" cy="12" r="8.4" stroke="url(#eg)" stroke-width="1.25"/>
-        <path d="M12 3.6 20.4 12 12 20.4 3.6 12Z" stroke="url(#eg)"
-          stroke-width="1.1" stroke-linejoin="round"/>
-        <circle cx="12" cy="12" r="2.2" fill="url(#eg)"/>
-        <defs>
-          <linearGradient id="eg" x1="0" y1="0" x2="24" y2="24">
-            <stop offset="0" stop-color="#4a9eff"/>
-            <stop offset="1" stop-color="#7c5cff"/>
-          </linearGradient>
-        </defs>
-      </svg>
-    </div>
-    <h2>输入基金代码开始</h2>
-    <p>系统会抓取该基金的复权净值与 47 个候选指数，做 11 种机器学习方法的滚动样本外拟合，
-       然后告诉你：它到底暴露在哪些风格上、哪个模型拟合最好、风格有没有漂移。</p>
-    <div class="chips" id="emptyChips"></div>
-  </div>
+<section id="empty" class="market-empty fund-empty" hidden>
+  <div class="empty-editorial"><span class="empty-number" aria-hidden="true">01—03</span><p>NAV · STYLE · PERSPECTIVE</p></div>
+  <p class="eyebrow">START YOUR RESEARCH</p><h3>选择一只基金，展开分析</h3>
+  <p>输入代码，或从下方示例开始。观察净值与风险，比较风格模型。分析区间至少两年。</p>
+  <div id="emptyChips" class="market-examples"></div>
+  <p class="note">拟合权重用于解释风格，不等于真实持仓；模型排名不代表未来收益。</p>
+</section>
 </div>
 
 <script src="/vendor/echarts.min.js"></script>

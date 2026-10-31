@@ -33,5 +33,24 @@ vm.runInContext(source.slice(source.indexOf('async function poll(jid'), source.i
   vm.runInContext('fundGeneration++', context);
   pending[3].resolve({status:'done'}); await poll;
   assert.equal(pending.length, 4);
+  // Backtest response fencing must cover both job status and result fetch.
+  const btPending = [], btContext = {
+    fundGeneration: 0, setTimeout: fn => fn(), $: () => ({}),
+    api: url => new Promise(resolve => btPending.push({url, resolve})),
+    setProgress() {}, showAlert() {throw Error('Stale backtest alert');},
+    renderBacktest() {throw Error('Stale backtest result');},
+  };
+  vm.createContext(btContext);
+  vm.runInContext(source.slice(source.indexOf('async function pollBacktest('), source.indexOf('function renderBacktest(')), btContext);
+  const btFirst = btContext.pollBacktest('first'); await Promise.resolve();
+  btContext.fundGeneration++;
+  btPending[0].resolve({status:'error',error:'obsolete'}); await btFirst;
+  assert.equal(btPending.length,1);
+  const btSecond = btContext.pollBacktest('second'); await Promise.resolve();
+  btPending[1].resolve({status:'done'}); await new Promise(setImmediate);
+  assert.equal(btPending[2].url,'/api/result/second');
+  btContext.fundGeneration++;
+  btPending[2].resolve({result:{}}); await btSecond;
   console.log('Correlation window, response ordering, replaced fund and stale polling: OK');
+  console.log('Backtest stale error and late result fencing: OK');
 })().catch(error => {console.error(error); process.exitCode=1;});

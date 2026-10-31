@@ -1,0 +1,14 @@
+{
+  "start": "2021-01-01",
+  "development_start": "2023-01-01",
+  "holdout_start": "2025-01-01",
+  "end": "2026-10-30",
+  "assets": [
+    {"kind": "stock", "code": "sh600519", "adjust": "qfq", "benchmark": "sh000300"},
+    {"kind": "stock", "code": "sz000001", "adjust": "qfq", "benchmark": "sh000300"},
+    {"kind": "stock", "code": "sz300750", "adjust": "qfq", "benchmark": "sz399006"},
+    {"kind": "stock", "code": "sh601318", "adjust": "qfq", "benchmark": "sh000300"},
+    {"kind": "index", "code": "sh000300", "benchmark": "sh000905"},
+    {"kind": "index", "code": "sz399006", "benchmark": "sh000300"}
+  ]
+}
