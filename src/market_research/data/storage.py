@@ -87,10 +87,33 @@ def write_metadata(name, meta):
         db.execute("UPDATE datasets SET metadata=? WHERE name=?", [json.dumps(meta), name])
 
 
-def stamp():
+def update_info(name, info):
+    """Merge descriptive fields under the same lock as market-data writes."""
     with connection() as db:
-        rows = db.execute("SELECT name, revision FROM datasets ORDER BY name").fetchall()
-    return hashlib.sha256(json.dumps(rows).encode()).hexdigest()
+        row = db.execute("SELECT metadata FROM datasets WHERE name=?", [name]).fetchone()
+        if row is None:
+            return
+        meta = json.loads(row[0])
+        meta.setdefault("info", {}).update(info)
+        db.execute("UPDATE datasets SET metadata=? WHERE name=?", [json.dumps(meta), name])
+
+
+def stamp(*, exclude_stocks=False, fund_code=None):
+    with connection() as db:
+        rows = db.execute("SELECT name, revision, metadata FROM datasets ORDER BY name").fetchall()
+    if exclude_stocks:
+        rows = [row for row in rows
+                if not row[0].startswith(("market_v1_stock_", "sync_history_stock_"))]
+    if fund_code is not None:
+        # Shared indices/valuation remain conservative dependencies. Only known
+        # fund namespaces can safely be excluded; unknown datasets stay included.
+        rows = [row for row in rows
+                if not row[0].startswith(("fund_nav_", "sync_history_fund_"))
+                or row[0].startswith((f"fund_nav_{fund_code}_", f"sync_history_fund_{fund_code}_"))]
+    # Metadata-only basis/version edits must also invalidate dependent results.
+    revisions = [(name, revision, {k: v for k, v in json.loads(meta).items() if k != "info"})
+                 for name, revision, meta in rows]
+    return hashlib.sha256(json.dumps(revisions, sort_keys=True).encode()).hexdigest()
 
 
 def summary():

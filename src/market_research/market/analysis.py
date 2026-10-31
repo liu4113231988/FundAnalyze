@@ -164,9 +164,34 @@ def analyze_market(kind, code, start=None, end=None, adjust="qfq", benchmark="sh
             context = context.loc[context.index > context.index[invalid][-1]]
         technical = analyze_technical(context, display_start=bars.index[0], adjust=adjust)
     payload = market_payload(kind, code, bars, reference, benchmark, adjust, warnings)
+    payload["quality"] = market_quality(bars, reference, start, end)
+    quality = payload["quality"]
+    payload["warnings"].append(
+        f"请求区间 {start} 至 {end}；实际行情 {quality['actual_start']} 至 {quality['actual_end']}。"
+        "自然日差距可能包含休市、停牌或上市时间差异，不直接判为行情过期。")
+    if quality["reference_missing_count"]:
+        payload["warnings"].append(
+            f"实际行情区间内有 {quality['reference_missing_count']} 个基准有行情而本资产无日线的日期；"
+            "可能为停牌或数据缺口，尚未核对交易日历，请在数据中心检查。")
     if technical is not None:
         payload["technical"] = _jsafe(technical)
     return payload
+
+
+def market_quality(bars, reference, start, end):
+    """Coverage evidence only; a benchmark is not an exchange trading calendar."""
+    first, last = bars.index[0], bars.index[-1]
+    missing = pd.DatetimeIndex([])
+    if reference is not None:
+        dates = reference.dropna().index
+        missing = dates[(dates >= first) & (dates <= last)].difference(bars.index).sort_values()
+    return {"requested_start": start, "requested_end": end,
+            "actual_start": first.date().isoformat(), "actual_end": last.date().isoformat(),
+            "end_gap_calendar_days": max(0, (pd.Timestamp(end) - last).days),
+            "calendar_verified": False, "reference_checked": reference is not None,
+            "reference_missing_count": len(missing),
+            "reference_missing_dates": missing[:10].strftime("%Y-%m-%d").tolist(),
+            "fetched_at": bars.attrs.get("fetched_at")}
 
 
 def market_payload(kind, code, bars, reference=None, benchmark="sh000300", adjust="qfq", warnings=None):

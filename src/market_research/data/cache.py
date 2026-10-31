@@ -6,9 +6,9 @@ import pandas as pd
 import market_research.config as C
 from market_research.data import storage
 
-def data_stamp() -> str:
-    """DuckDB 数据内容指纹；读取及元信息更新不会使结果缓存失效。"""
-    return storage.stamp()
+def data_stamp(*, exclude_stocks=False, fund_code=None) -> str:
+    """内容指纹；可隔离股票/其他基金，保守保留共享与未知依赖。"""
+    return storage.stamp(exclude_stocks=exclude_stocks, fund_code=fund_code)
 
 
 def _cache_meta_path(name: str) -> Path:
@@ -52,9 +52,7 @@ def cache_info(name: str) -> dict:
 
 
 def _cache_info_write(name: str, info: dict):
-    cur = storage.metadata(name) or {}
-    cur.setdefault("info", {}).update(info)
-    storage.write_metadata(name, cur)
+    storage.update_info(name, info)
 
 
 def _cached(name: str, builder, meta: Optional[dict] = None, refresh=False):

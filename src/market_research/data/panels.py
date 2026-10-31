@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Optional
+import logging
 import numpy as np
 import pandas as pd
 import market_research.config as C
@@ -8,6 +9,8 @@ from market_research.data.cache import _cached, _cache_info_write, _with_info
 from market_research.data.providers.funds import NAV_BASIS_CUM, NAV_BASIS_TOTAL, fetch_fund_nav, fetch_fund_total_return
 from market_research.data.providers.indices import fetch_universe
 from market_research.data.providers.valuation import fetch_pe_panel
+
+LOG = logging.getLogger(__name__)
 
 def align_prices(px: pd.DataFrame, nav: pd.Series, max_ffill: int = 5,
                  min_coverage: float = 0.97) -> pd.DataFrame:
@@ -91,6 +94,16 @@ def load_index_universe(start: Optional[str] = None,
     #   下游的覆盖率过滤会把它们当"中途停编"剔除，掩盖了真实原因是抓取失败。
     #   无条件写入（空列表 = 无缺失），否则"没这个字段"和"没缺失"分不清。
     missing = [c for c in C.NAME_OF if c not in df.columns]
+    if missing and not refresh:
+        try:
+            add = fetch_universe(missing, start, end, verbose=verbose)
+            add = add.loc[:, add.columns.intersection(missing)].dropna(axis=1, how="all")
+            if not add.empty:
+                df = pd.concat([df, add], axis=1).sort_index()
+                storage.write(cache_name, df, _with_info(meta, df))
+        except Exception:
+            LOG.warning("补取候选指数失败，保留已有行情", exc_info=True)
+        missing = [c for c in C.NAME_OF if c not in df.columns]
     _cache_info_write(cache_name, {
         "missing_assets": missing,
         "n_missing": len(missing),

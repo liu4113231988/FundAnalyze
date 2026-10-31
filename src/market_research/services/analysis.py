@@ -37,7 +37,7 @@ def result_cache_path(code, models, params, max_rebal=None, auto_equity=False, d
 
 
 def fund_cache_path(params):
-    return result_cache_path(params["code"],params["models"],params["params"],params.get("max_rebal"),params.get("auto_equity",False),D.data_stamp(),params.get("start"),params.get("end"))
+    return result_cache_path(params["code"],params["models"],params["params"],params.get("max_rebal"),params.get("auto_equity",False),D.data_stamp(exclude_stocks=True,fund_code=params["code"]),params.get("start"),params.get("end"))
 
 
 def submit(operation, params):
@@ -63,9 +63,13 @@ def submit(operation, params):
 
 def execute(operation, params, jid):
     if operation == "analyze":
+        initial_path = fund_cache_path(params)
         result=analyze(**params,job_id=jid)
         try:
-            _atomic_pickle_dump(result,fund_cache_path(params))
+            if fund_cache_path(params) == initial_path:
+                _atomic_pickle_dump(result,initial_path)
+            else:
+                LOG.info("分析期间行情发生变化，跳过结果缓存写入")
         except Exception:
             LOG.exception("分析完成，但缓存写入失败")
         return result
