@@ -2,7 +2,7 @@
 """
 P0-01 验收入口：逐基金核对收益口径。
 
-    python run_verify_basis.py [基金代码...]
+    python run.py verify-basis [基金代码...]
 
 对每只基金调用 `market_research.data.marketdata.verify_nav_basis`，比较三种口径的期末总回报：
   A 累计净值直算（旧口径）
@@ -32,11 +32,11 @@ import market_research.data.marketdata as D
 RES = ROOT / "output" / "results"
 
 
-def main():
+def main(argv=None, *, prog=None):
     import argparse
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, prog=prog)
     parser.add_argument("codes", nargs="*", help="基金代码；留空使用扩展样本")
-    codes = parser.parse_args().codes or list(C.EXTENDED_FUNDS.keys())
+    codes = parser.parse_args(argv).codes or list(C.EXTENDED_FUNDS.keys())
     rows = []
     for code in codes:
         try:

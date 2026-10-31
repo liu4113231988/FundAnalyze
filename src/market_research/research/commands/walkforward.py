@@ -2,7 +2,7 @@
 """
 按管理人分折的 walk-forward 验证（E9）。
 
-    python run_walkforward.py [基金代码...]
+    python run.py walkforward [基金代码...]
 
 回答的问题：E4 报告的"最优参数"如果是在一部分基金上选出来的，
 用到**没见过**的基金上还灵吗？参数选择的过拟合代价有多大？
@@ -15,9 +15,9 @@
 过拟合代价 = oracle − 迁移配置。若接近 0，说明参数选择没怎么过拟合；
 若显著为正，说明"从网格里挑最大值"确实只是挑到了噪声。
 
-    python run_walkforward.py                 # 全部 14 只，默认近 5 年
-    python run_walkforward.py 110022 000001   # 指定基金
-    python run_walkforward.py --window-years 2  # 近 2 年窗口（下限 2 年；
+    python run.py walkforward                 # 全部 14 只，默认近 5 年
+    python run.py walkforward 110022 000001   # 指定基金
+    python run.py walkforward --window-years 2  # 近 2 年窗口（下限 2 年；
         注意：折数多而窗口短时 E9b 可能因测试期样本不足而无法进行）
 """
 import argparse
@@ -45,12 +45,12 @@ except Exception:
     pass
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+def main(argv=None, *, prog=None):
+    ap = argparse.ArgumentParser(description=__doc__, prog=prog)
     add_window_args(ap)
     ap.add_argument("codes", nargs="*",
                     help="基金代码，留空则用 EXTENDED_FUNDS")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     apply_window(args)
     codes = args.codes or list(C.EXTENDED_FUNDS.keys())
     t0 = time.time()

@@ -4,9 +4,9 @@ import market_research.data.marketdata as D
 import market_research.data.storage as storage
 
 
-def main():
+def main(argv=None, *, prog=None):
     import argparse
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    argparse.ArgumentParser(description=__doc__, prog=prog).parse_args(argv)
     count = 0
     for path in sorted(C.DATA_DIR.glob("*.csv")):
         if not (path.stem.startswith(("fund_nav_", "index_universe_")) or path.stem == "pe_panel"):

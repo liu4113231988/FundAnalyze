@@ -2,7 +2,7 @@
 """
 P1-03 · 选择过程感知的显著性检验。
 
-    python run_selection.py            # 读 E9b_候选配置明细.csv
+    python run.py selection            # 读 E9b_候选配置明细.csv
 
 回答：E9b 的"过拟合代价 0.769"里，多少是**真实过拟合**，多少只是
 "从 12 个候选里挑最大值"的**抽签运气**。
@@ -28,16 +28,16 @@ from market_research.research.selection import rank_percentile, selection_aware_
 RES = ROOT / "output" / "results"
 
 
-def main():
+def main(argv=None, *, prog=None):
     import argparse
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    argparse.ArgumentParser(description=__doc__, prog=prog).parse_args(argv)
     fp = RES / "E9b_候选配置明细.csv"
     if not fp.exists():
-        print(f"缺 {fp} —— 先跑 python run_walkforward.py")
+        print(f"缺 {fp} —— 先跑 python run.py walkforward")
         return 1
     cand = pd.read_csv(fp)
     if cand.empty or "被训练期选中" not in cand.columns:
-        print("候选明细为空或列不全，先重跑 run_walkforward.py")
+        print("候选明细为空或列不全，先重跑 python run.py walkforward")
         return 1
     fbf = RES / "E9b_候选逐基金IR.csv"
     by_fund = pd.read_csv(fbf) if fbf.exists() else pd.DataFrame()
@@ -60,7 +60,7 @@ def main():
     print("[2] 选择感知 bootstrap：把'从候选里选最优'放进零假设")
     print("=" * 100)
     if by_fund.empty:
-        print("  跳过：缺 E9b_候选逐基金IR.csv，重跑 run_walkforward.py")
+        print("  跳过：缺 E9b_候选逐基金IR.csv，重跑 python run.py walkforward")
         sa = {"ok": False}
     else:
         sa = selection_aware_bootstrap(by_fund, block=60, n_boot=2000)

@@ -9,7 +9,7 @@
 
 现在按教科书做法重做：先声明检验与效应量，再算所需样本与当前功效。
 
-    python run_power.py          # 读 output/results/E7_*.csv，写 P0-06_功效分析.csv
+    python run.py power          # 读 output/results/E7_*.csv，写 P0-06_功效分析.csv
 """
 import sys
 import warnings
@@ -65,9 +65,9 @@ def power_of(delta: float, n_eff: float) -> float:
     return float(stats.norm.cdf(delta * np.sqrt(n_eff) - Z_A))
 
 
-def main():
+def main(argv=None, *, prog=None):
     import argparse
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    argparse.ArgumentParser(description=__doc__, prog=prog).parse_args(argv)
     rows = []
     for name, fp, col, sumfp, exfp in STRATS:
         p = RES / fp

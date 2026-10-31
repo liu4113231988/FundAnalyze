@@ -1,5 +1,5 @@
-"""Compatibility entry; implementation lives in market_research."""
-from market_research.cli.cache_migrate import main
+"""Compatibility entry using the shared command registry."""
+from market_research.cli.main import legacy_main
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(legacy_main(__file__))

@@ -2,11 +2,11 @@
 """
 真实持仓 vs RBSA 拟合持仓的对齐入口。
 
-    python run_holdings.py                    # 全部 EXTENDED_FUNDS
-    python run_holdings.py 110022 000001      # 指定基金
-    python run_holdings.py --pool             # 用扩池后的基金池（market_research.funds.universe.load_pool）
-    python run_holdings.py --refresh          # 强制重抓持仓与行业映射
-    python run_holdings.py --window-years 2   # 近 2 年窗口（下限 2 年）
+    python run.py holdings                    # 全部 EXTENDED_FUNDS
+    python run.py holdings 110022 000001      # 指定基金
+    python run.py holdings --pool             # 用扩池后的基金池（market_research.funds.universe.load_pool）
+    python run.py holdings --refresh          # 强制重抓持仓与行业映射
+    python run.py holdings --window-years 2   # 近 2 年窗口（下限 2 年）
 
 做两件事（对应 TODO 的"验证"与"替代"）：
 
@@ -98,8 +98,8 @@ def run_one(code: str, industry_map: pd.Series, refresh: bool = False) -> dict:
     return out
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+def main(argv=None, *, prog=None):
+    ap = argparse.ArgumentParser(description=__doc__, prog=prog)
     add_window_args(ap)
     ap.add_argument("codes", nargs="*",
                     help="基金代码，留空则用 EXTENDED_FUNDS")
@@ -108,7 +108,7 @@ def main():
     ap.add_argument("--pool", action="store_true",
                     help="用扩池后的基金池（output/data/fund_pool.csv），"
                          "而非 C.EXTENDED_FUNDS")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     win_start, _ = apply_window(args)
     codes = args.codes
     if not codes:

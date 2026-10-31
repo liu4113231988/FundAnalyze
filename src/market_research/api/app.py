@@ -25,7 +25,7 @@ import market_research.api.routes.tasks as tasks
 from market_research.api.schemas import ErrorResponse
 
 LOG=logging.getLogger(__name__)
-STATIC=Path(str(files('webapp')/'static'))
+STATIC=Path(str(files('market_research.api')/'static'))
 
 
 class BodyLimit:

@@ -2,9 +2,9 @@
 """
 基金池扩充入口：按 `docs/扩池预注册规则.md` 冻结的规则筛选样本。
 
-    python run_expand_pool.py                  # 默认预抽 1200 只取详情，每层 20 只
-    python run_expand_pool.py --per-layer 25   # 每层 25 只（共约 75 只）
-    python run_expand_pool.py --pre-sample 300 # 缩小预抽（调试，快但不全）
+    python run.py expand-pool                  # 默认预抽 1200 只取详情，每层 20 只
+    python run.py expand-pool --per-layer 25   # 每层 25 只（共约 75 只）
+    python run.py expand-pool --pre-sample 300 # 缩小预抽（调试，快但不全）
 
 输出：
   output/data/fund_pool.csv      入选清单（其他脚本用 market_research.funds.universe.load_pool() 读）
@@ -38,15 +38,15 @@ from market_research.funds.universe import build_pool, load_pool
 pd.set_option("display.width", 220)
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+def main(argv=None, *, prog=None):
+    ap = argparse.ArgumentParser(description=__doc__, prog=prog)
     ap.add_argument("--per-layer", type=int, default=20,
                     help="每个成立时间层纳入多少只（默认 20，三层共约 60 只）")
     ap.add_argument("--pre-sample", type=int, default=1200,
                     help="从粗筛选出的候选里预抽多少只取详情（默认 1200）")
     ap.add_argument("--seed", type=int, default=None,
                     help="抽样种子（默认用 fundpool.DEFAULT_SEED，保证可复现）")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     t0 = time.time()
     kw = {} if args.seed is None else {"seed": args.seed}
@@ -81,7 +81,7 @@ def main():
     print("\n下一步：")
     print("  python warm_cache.py $(python -c \"from market_research.funds.universe import load_pool; "
           "print(' '.join(load_pool()['基金代码']))\")")
-    print("  python run_holdings.py $(python -c \"from market_research.funds.universe import load_pool; "
+    print("  python run.py holdings $(python -c \"from market_research.funds.universe import load_pool; "
           "print(' '.join(load_pool()['基金代码']))\")")
     return 0
 

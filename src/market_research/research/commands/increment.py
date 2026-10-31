@@ -22,8 +22,8 @@
 把训练段再切 3 段分别拟合，看相邻段权重的 L1 变动。若风格画像只是
 "多拟合了一些噪声"，它的稳定性应该**更差**而不是更好。
 
-    python run_increment.py [基金代码...]
-    python run_increment.py --window-years 2      # 近 2 年窗口（下限 2 年）
+    python run.py increment [基金代码...]
+    python run.py increment --window-years 2      # 近 2 年窗口（下限 2 年）
 
 注意：本脚本用**面板内切分**做训练/测试（TRAIN_FRAC），窗口越短可切段越少；
 2 年窗口下 `sp < 200` 会直接跳过并返回 None。
@@ -149,12 +149,12 @@ def run_one(code):
     return out
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+def main(argv=None, *, prog=None):
+    ap = argparse.ArgumentParser(description=__doc__, prog=prog)
     add_window_args(ap)
     ap.add_argument("codes", nargs="*",
                     help="基金代码，留空则用 EXTENDED_FUNDS")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     apply_window(args)
     codes = args.codes or list(C.EXTENDED_FUNDS.keys())
     rows = [r for r in (run_one(c) for c in codes) if r]

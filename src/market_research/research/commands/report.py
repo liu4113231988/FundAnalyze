@@ -38,12 +38,12 @@ def read_csv_safe(name: str):
     return None
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+def main(argv=None, *, prog=None):
+    ap = argparse.ArgumentParser(description=__doc__, prog=prog)
     add_window_args(ap)
     ap.add_argument("code", nargs="?", default=C.MAIN_FUND,
                     help="主案例基金代码，默认 C.MAIN_FUND")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     apply_window(args)
     code = args.code
     name = C.DEMO_FUNDS.get(code, C.EXTENDED_FUNDS.get(code, code))

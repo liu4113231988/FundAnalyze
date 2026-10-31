@@ -8,9 +8,9 @@
   output/results/X2_扩展_周期矩阵.csv 信号窗口 × 再平衡周期 的超额夏普矩阵（跨基金平均）
   output/results/X3_扩展_IC期限结构.csv
 
-    python run_extended.py                  # 全部 EXTENDED_FUNDS，默认近 5 年
-    python run_extended.py 110022 000001    # 指定基金
-    python run_extended.py --window-years 2 # 改用近 2 年窗口（下限 2 年）
+    python run.py extended                  # 全部 EXTENDED_FUNDS，默认近 5 年
+    python run.py extended 110022 000001    # 指定基金
+    python run.py extended --window-years 2 # 改用近 2 年窗口（下限 2 年）
 """
 import argparse
 import sys
@@ -32,12 +32,12 @@ from market_research.research.experiments import ic_term_structure, lowfreq_grid
 pd.set_option("display.width", 220)
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+def main(argv=None, *, prog=None):
+    ap = argparse.ArgumentParser(description=__doc__, prog=prog)
     add_window_args(ap)
     ap.add_argument("codes", nargs="*",
                     help="基金代码，留空则用 EXTENDED_FUNDS")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     apply_window(args)
     codes = args.codes or list(C.EXTENDED_FUNDS.keys())
     t0 = time.time()

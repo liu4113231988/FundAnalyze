@@ -8,7 +8,7 @@
 
 用途：
     1. 扩池前批量下载数据（网络波动时可以反复跑到全部成功为止）
-    2. 离线分析前的准备 —— 缓存齐全后 run.py / run_extended.py / webapp 全部离线可用
+    2. 离线分析前的准备 —— 缓存齐全后 run.py analyze / run.py extended / Web 分析均可离线使用
 
 存储结构（src/data.py 的分层缓存）：
     output/data/market.duckdb  指数与基金日频行情（旧 CSV 自动导入）
@@ -31,8 +31,8 @@ import market_research.config as C
 import market_research.data.marketdata as D
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def main(argv=None, *, prog=None):
+    ap = argparse.ArgumentParser(prog=prog)
     ap.add_argument("codes", nargs="*", help="基金代码，留空则用 EXTENDED_FUNDS")
     ap.add_argument("--refresh", action="store_true", help="强制重抓")
     # ★ 默认必须走 fetch_start_for()，不能用 C.START_DATE（滚动近 5 年）。
@@ -41,7 +41,7 @@ def main():
     #   预热等于白做，而且每天跑一次就多一份缓存。
     ap.add_argument("--start", default=None,
                     help="抓取起点，默认 C.FETCH_START_DATE（分析窗口在分析时裁剪）")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     start = D.fetch_start_for(args.start)
     if args.start and args.start != start:

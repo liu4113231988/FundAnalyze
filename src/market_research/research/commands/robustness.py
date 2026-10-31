@@ -2,7 +2,7 @@
 """
 E7 · 稳健性检验：E4 那条"250 日窗口 + 120 日再平衡"的线索到底有多可信。
 
-    python run_robustness.py [代码...]      # 默认全部 14 只
+    python run.py robustness [代码...]      # 默认全部 14 只
 
 回答三个问题：
   1. 14 只基金的有效独立样本量有多少？（横截面相关矩阵）
@@ -12,9 +12,9 @@ E7 · 稳健性检验：E4 那条"250 日窗口 + 120 日再平衡"的线索到�
 ⚠ 因子回归里 β 接近 1 不代表模型有问题 —— 策略平均仓位只有 ~60%，
    低仓位策略天然就有 β≈0.6。真正的判据是 **α 是否显著为正**。
 
-    python run_robustness.py                 # 全部 14 只，默认近 5 年
-    python run_robustness.py 110022 000001   # 指定基金
-    python run_robustness.py --window-years 2  # 近 2 年窗口（下限 2 年）
+    python run.py robustness                 # 全部 14 只，默认近 5 年
+    python run.py robustness 110022 000001   # 指定基金
+    python run.py robustness --window-years 2  # 近 2 年窗口（下限 2 年）
 """
 import argparse
 import sys
@@ -109,12 +109,12 @@ def _report(res: dict, label: str = "") -> None:
         print(f"  · 年化换手 {pf[trncol].mean():.2f}x")
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+def main(argv=None, *, prog=None):
+    ap = argparse.ArgumentParser(description=__doc__, prog=prog)
     add_window_args(ap)
     ap.add_argument("codes", nargs="*",
                     help="基金代码，留空则用 EXTENDED_FUNDS")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     apply_window(args)
     codes = args.codes or list(C.EXTENDED_FUNDS.keys())
     t0 = time.time()

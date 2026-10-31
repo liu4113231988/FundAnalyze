@@ -1,0 +1,1 @@
+"""Module-scoped test suite."""

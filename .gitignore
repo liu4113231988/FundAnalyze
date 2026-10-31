@@ -10,16 +10,16 @@ venv/
 
 # ============================================================ 运行产物
 # output/ 全部是脚本产物，不入库：
-#   output/data/    行情与估值缓存（14 只基金 × 面板，约 15 MB）
+#   output/data/    DuckDB 行情、队列与计算缓存
 #   output/results/ 实验与回测 CSV
 #   output/figures/ 报告图表
 #   output/*.log    运行日志
-# 首次运行会自动重建（src/config.py 里 mkdir(parents=True, exist_ok=True)）。
+# 首次运行会自动重建（market_research/config.py 里 mkdir(parents=True, exist_ok=True)）。
 # 注意：这些 CSV 会随评价口径变更而失效，入库只会留下过期数字。
 output/
 
 # build_report.py 生成：内含 base64 内嵌图片（约 1.7 MB），
-# 且方法论一变就过期。用 python build_report.py 重新生成即可。
+# 且方法论一变就过期。用 uv run python run.py report 重新生成即可。
 report/*.html
 
 # ============================================================ 编辑器 / 系统

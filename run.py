@@ -1,5 +1,5 @@
-"""Compatibility entry; implementation lives in market_research."""
-from market_research.cli.analyze import main
+"""Unified root entry; use --help to list commands."""
+from market_research.cli.main import root_main as main
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -25,13 +25,10 @@ market-research-sync = "market_research.tasks.sync:main"
 market-research-cli = "market_research.cli.main:main"
 
 [tool.setuptools.packages.find]
-where = ["src", "."]
+where = ["src", "compat"]
 include = ["market_research*", "src", "webapp", "webapp.api"]
 namespaces = false
 
-[tool.setuptools.exclude-package-data]
-src = ["market_research/**", "migrations/**"]
-
 [tool.setuptools.package-data]
 "market_research.data" = ["migrations/*.sql"]
-webapp = ["static/*.html", "static/*.js", "static/*.css", "static/vendor/*"]
+"market_research.api" = ["static/*.html", "static/*.js", "static/*.css", "static/vendor/*"]

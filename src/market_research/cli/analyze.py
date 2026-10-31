@@ -28,14 +28,14 @@ from market_research.funds.pipeline import run_fund, save_result
 from market_research.validation.window import add_window_args, apply_window
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def main(argv=None, *, prog=None):
+    ap = argparse.ArgumentParser(prog=prog)
     ap.add_argument("codes", nargs="*", help="基金代码，留空则跑全部演示基金")
     ap.add_argument("--refresh", action="store_true", help="强制刷新数据缓存")
     ap.add_argument("--start", default=None, help="回测起始日 YYYY-MM-DD")
     ap.add_argument("--end", default=None, help="回测结束日 YYYY-MM-DD")
     add_window_args(ap)          # --window-years / --window-start / --window-end
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     # 分析窗口：就地覆盖 C.START_DATE / C.END_DATE，下游全部跟随
     win_start, _ = apply_window(args)
